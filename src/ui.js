@@ -16,7 +16,7 @@ export const on = {
   startMatch: () => {}, cancelHost: () => {}, requiredChange: () => {}, shuffleSeats: () => {},
   confirmAsk: () => {}, confirmDeclare: () => {}, restart: () => {}, quitToMenu: () => {},
   openAsk: () => {}, openDeclare: () => {}, toggleMotion: () => {},
-  rejoinYes: () => {}, rejoinNo: () => {}
+  rejoinYes: () => {}, rejoinNo: () => {}, seatClick: () => {}
 };
 
 /* ---------------- screens ---------------- */
@@ -84,15 +84,45 @@ export function showQueueView(show, info) {
   if (show && info) updateQueueView(info);
 }
 
+let queueSeating = null;    // {roster, seat} pushed by the host
+
 export function updateQueueView(info) {
   el('queueTitle').textContent = info.name || 'Table';
+  let seating = '';
+  if (queueSeating) {
+    const { roster, seat } = queueSeating;
+    const side = t => roster.filter(r => r.team === t)
+      .map(r => '<span class="qName' + (r.seat === seat ? ' me' : '') + '">' +
+        esc(r.name) + (r.bot ? ' <i>bot</i>' : '') + '</span>').join('');
+    seating =
+      '<div class="qTeams">' +
+      '<div class="qTeam"><div class="qHead" style="color:' + TEAM_CSS[0] + '">' +
+        TEAM_NAME[0] + '</div>' + side(0) + '</div>' +
+      '<div class="qTeam"><div class="qHead" style="color:' + TEAM_CSS[1] + '">' +
+        TEAM_NAME[1] + '</div>' + side(1) + '</div></div>';
+    if (seat >= 0) seating += '<div class="qYou" style="color:' + TEAM_CSS[SEAT_TEAM[seat]] +
+      '">You are on ' + TEAM_NAME[SEAT_TEAM[seat]] + '</div>';
+  } else {
+    seating = '<div class="queueNames">' + (info.players || []).map(esc).join(' · ') + '</div>';
+  }
   el('queueInfo').innerHTML =
     '<b>' + info.queued + '</b> of <b>' + info.required + '</b> players queued' +
-    '<div class="queueNames">' + (info.players || []).map(esc).join(' · ') + '</div>' +
+    seating +
     '<div class="queueWait">Waiting for the host to start the match…</div>';
 }
 
-/* ---------------- host overlay ---------------- */
+/** The host rearranged the seats — refresh what the queued player sees. */
+export function updateQueueSeating(roster, seat) {
+  queueSeating = { roster, seat };
+  const t = el('queueTitle').textContent;
+  updateQueueView({ name: t, queued: roster.filter(r => !r.bot).length,
+                    required: roster.length, players: [] });
+}
+export function clearQueueSeating() { queueSeating = null; }
+
+/* ---------------- host overlay ----------------
+   Six fixed seats, alternating team by parity. The host assigns teams by
+   moving people between seats: tap one, tap another, they swap. */
 export function renderHostPanel(info) {
   el('hostCode').textContent = info.code;
   el('hostNetLabel').textContent = info.netKey === 'global'
@@ -101,28 +131,31 @@ export function renderHostPanel(info) {
 
   const box = el('hostPlayers');
   box.innerHTML = '';
-  info.players.forEach((p, i) => {
-    const d = document.createElement('div');
-    d.className = 'hostPlayer';
+  (info.roster || []).forEach((r, i) => {
     const team = SEAT_TEAM[i];
-    d.innerHTML = '<span class="dot" style="background:' + TEAM_CSS[team] + '"></span>' +
-      '<span class="hpName">' + esc(p.name) + (p.isHost ? ' <i>(you, host)</i>' : '') + '</span>' +
+    const d = document.createElement('div');
+    d.className = 'hostPlayer seatRow team' + team +
+      (info.picked === i ? ' picked' : '') +
+      (info.picked >= 0 && info.picked !== i ? ' target' : '') +
+      (r.kind === 'bot' ? ' bot' : '');
+    d.innerHTML =
+      '<span class="dot" style="background:' + TEAM_CSS[team] + '"></span>' +
+      '<span class="hpName">' + esc(r.name) +
+        (r.kind === 'host' ? ' <i>(you, host)</i>' : '') +
+        (r.kind === 'bot' ? ' <i>(bot)</i>' : '') + '</span>' +
       '<span class="hpTeam" style="color:' + TEAM_CSS[team] + '">' + TEAM_NAME[team] + '</span>';
+    d.onclick = () => on.seatClick(i);
     box.appendChild(d);
   });
-  const botSeats = 6 - info.players.length;
-  if (botSeats > 0) {
-    const d = document.createElement('div');
-    d.className = 'hostPlayer bot';
-    d.innerHTML = '<span class="dot" style="background:#4a5a6a"></span>' +
-      '<span class="hpName">' + botSeats + ' seat' + (botSeats > 1 ? 's' : '') + ' will be filled by bots</span>';
-    box.appendChild(d);
-  }
 
-  el('queuedCount').textContent = info.players.length;
+  el('seatHint').textContent = info.picked >= 0
+    ? 'Now tap another seat to swap ' + (info.roster[info.picked].name) + ' into it.'
+    : 'Tap a seat, then tap another to swap them. Teams follow the seats.';
+
+  el('queuedCount').textContent = info.humans;
   el('reqCount').textContent = info.required;
-  el('btnStart').disabled = info.players.length < info.required;
-  el('btnStart').textContent = info.players.length < info.required
+  el('btnStart').disabled = info.humans < info.required;
+  el('btnStart').textContent = info.humans < info.required
     ? 'Waiting for players…' : 'Start Match';
 }
 

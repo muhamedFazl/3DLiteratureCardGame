@@ -25,7 +25,12 @@ const App = {
   hostNet: null,
   clientNet: null,
   gameHost: null,
-  seatOrder: [],         // host lobby: ordered list of {peerId|null, name}
+  // Host lobby seating: a fixed array of 6 slots, one per seat. Seat parity
+  // decides the team (SEAT_TEAM), so "assign a team" means "put them in a seat
+  // of that colour" — which keeps teams 3v3 by construction.
+  roster: [],            // [{kind:'host'|'peer'|'bot', peerId?, name}]
+  hostSeat: 0,
+  pickedSeat: -1,        // seat the host has selected for a swap, or -1
   seatOfPeer: new Map(), // peerId -> seat (during a match)
   peerOfSeat: new Map(),
   required: 2,
@@ -162,6 +167,7 @@ function handleMsg(msg) {
       App.myHand = [];
       App.streak = 0; App.streakSeat = -1;
       App.mode = 'match';
+      UI.clearQueueSeating();
       View.setSeats(msg.seats, App.mySeat);
       UI.clearLog();
       UI.overlay('joinOverlay', false);
@@ -219,6 +225,12 @@ function handleMsg(msg) {
       updateControls();
       break;
     }
+
+    case 'lobbyseat':
+      App.lobbySeat = msg.seat;
+      App.lobbyRoster = msg.roster;
+      UI.updateQueueSeating(msg.roster, msg.seat);
+      break;
 
     case 'ev':
       handleEvent(msg);
@@ -331,6 +343,44 @@ async function ensureSignal() {
   return sig;
 }
 
+const BOT_POOL = ['Bot Alpha', 'Bot Bravo', 'Bot Cass', 'Bot Delta', 'Bot Echo', 'Bot Foxtrot'];
+
+function freshRoster(hostName) {
+  const r = [];
+  for (let i = 0; i < 6; i++) r.push({ kind: 'bot', name: BOT_POOL[i] });
+  r[0] = { kind: 'host', name: hostName };
+  return r;
+}
+const rosterHumans = () => App.roster.filter(r => r && r.kind !== 'bot').length;
+const seatOfPeerId = id => App.roster.findIndex(r => r && r.peerId === id);
+
+/** Public seating summary — safe to share, it is only names and seats. */
+function rosterSummary() {
+  return App.roster.map((r, i) => ({
+    seat: i, name: r.name, bot: r.kind === 'bot', team: SEAT_TEAM[i]
+  }));
+}
+
+/** Tell every queued player where they are sitting and who else is where. */
+function pushLobbySeats() {
+  if (!App.hostNet) return;
+  const roster = rosterSummary();
+  for (const p of App.hostNet.connectedPeers()) {
+    const seat = seatOfPeerId(p.id);
+    App.hostNet.sendTo(p.id, { k: 'lobbyseat', seat, roster });
+  }
+}
+
+function swapSeats(a, b) {
+  if (a === b || a < 0 || b < 0) return;
+  const tmp = App.roster[a];
+  App.roster[a] = App.roster[b];
+  App.roster[b] = tmp;
+  App.hostSeat = App.roster.findIndex(r => r.kind === 'host');
+  renderHost();
+  pushLobbySeats();
+}
+
 async function startHosting() {
   try {
     UI.overlay('hostOverlay', true);
@@ -352,13 +402,18 @@ async function startHosting() {
   App.hostNet = new HostNet(App.sig, App.netKey, {
     name: hostName + "'s table", hostName, required: App.required
   });
-  App.seatOrder = [{ peerId: null, name: hostName, isHost: true }];
+  App.roster = freshRoster(hostName);
+  App.hostSeat = 0;
+  App.pickedSeat = -1;
 
   App.hostNet.onJoin = (peerId, name) => {
-    if (App.seatOrder.some(p => p.peerId === peerId)) return;
-    App.seatOrder.push({ peerId, name, isHost: false });
-    UI.log(name + ' joined the queue.', 'sys');
+    if (seatOfPeerId(peerId) >= 0) return;
+    const free = App.roster.findIndex(r => r.kind === 'bot');
+    if (free < 0) return;                       // table full; HostNet also guards this
+    App.roster[free] = { kind: 'peer', peerId, name };
+    UI.log(name + ' joined the queue — seated on ' + TEAM_NAME[SEAT_TEAM[free]] + '.', 'sys');
     renderHost();
+    pushLobbySeats();
   };
   App.hostNet.onRejoin = (peerId, name, seat) => {
     App.seatOfPeer.set(peerId, seat);
@@ -368,8 +423,11 @@ async function startHosting() {
     renderHost();
   };
   App.hostNet.onLeave = peerId => {
-    const i = App.seatOrder.findIndex(p => p.peerId === peerId);
-    if (i >= 0) App.seatOrder.splice(i, 1);
+    const i = seatOfPeerId(peerId);
+    if (i >= 0 && App.mode !== 'match') {
+      App.roster[i] = { kind: 'bot', name: BOT_POOL[i] };
+      pushLobbySeats();
+    }
     if (App.mode === 'match' && App.seatOfPeer.has(peerId)) {
       const seat = App.seatOfPeer.get(peerId);
       // Capture the name BEFORE convertToBot appends " (bot)", so the seat can
@@ -399,14 +457,16 @@ function renderHost() {
   UI.renderHostPanel({
     code: App.hostNet.code,
     netKey: App.netKey,
-    players: App.seatOrder,
+    roster: App.roster,
+    humans: rosterHumans(),
+    picked: App.pickedSeat,
     required: App.required
   });
 }
 
 function cancelHosting() {
   if (App.hostNet) { App.hostNet.close(); App.hostNet = null; }
-  App.seatOrder = [];
+  App.roster = []; App.pickedSeat = -1;
   App.mode = 'menu';
   App.online = false;
   UI.overlay('hostOverlay', false);
@@ -415,26 +475,18 @@ function cancelHosting() {
 
 function startHostedMatch() {
   if (!App.hostNet) return;
-  const humans = App.seatOrder.slice(0, 6);
-  if (humans.length < App.required) return;
+  if (rosterHumans() < App.required) return;
 
   App.hostNet.markStarted();
   App.seatOfPeer.clear(); App.peerOfSeat.clear();
 
-  const seats = [];
-  const botPool = ['Bot Alpha', 'Bot Bravo', 'Bot Cass', 'Bot Delta', 'Bot Echo'];
-  let bi = 0;
-  for (let s = 0; s < 6; s++) {
-    const h = humans[s];
-    if (h) {
-      seats.push({ name: h.name, isBot: false });
-      if (h.peerId) { App.seatOfPeer.set(h.peerId, s); App.peerOfSeat.set(s, h.peerId); }
-    } else {
-      seats.push({ name: botPool[bi++ % botPool.length], isBot: true });
-    }
-  }
+  const seats = App.roster.map((r, i) => {
+    if (r.kind === 'peer') { App.seatOfPeer.set(r.peerId, i); App.peerOfSeat.set(i, r.peerId); }
+    return { name: r.name, isBot: r.kind === 'bot' };
+  });
+  App.hostSeat = App.roster.findIndex(r => r.kind === 'host');
 
-  const io = makeIo(0, handleMsg, (seat, msg) => {
+  const io = makeIo(App.hostSeat, handleMsg, (seat, msg) => {
     if (seat === null) {
       for (const [pid] of App.seatOfPeer) App.hostNet.sendTo(pid, msg);
     } else {
@@ -528,7 +580,8 @@ function joinLobby(lobby) {
 }
 
 function leaveQueue() {
-  clearSession();                           // leaving on purpose is not a dropout
+  clearSession();
+  UI.clearQueueSeating();                           // leaving on purpose is not a dropout
   if (App.clientNet) App.clientNet.leave();
   App.joiningId = null;
   if (App.mode === 'queued') App.mode = 'browsing';
@@ -550,7 +603,7 @@ function quitToMenu() {
   teardownMatch();
   if (App.hostNet) { App.hostNet.close(); App.hostNet = null; }
   if (App.clientNet) { App.clientNet.leave(); App.clientNet.stopDiscovery(); }
-  App.seatOrder = []; App.seatOfPeer.clear(); App.peerOfSeat.clear();
+  App.roster = []; App.pickedSeat = -1; App.seatOfPeer.clear(); App.peerOfSeat.clear();
   App.mode = 'menu'; App.online = false; App.isHost = false;
   UI.overlay('joinOverlay', false);
   UI.overlay('hostOverlay', false);
@@ -632,9 +685,21 @@ UI.on.requiredChange = delta => {
   renderHost();
 };
 UI.on.shuffleSeats = () => {
-  const host = App.seatOrder[0];
-  const rest = shuffle(App.seatOrder.slice(1));
-  App.seatOrder = [host, ...rest];
+  if (!App.roster.length) return;
+  App.roster = shuffle(App.roster.slice());
+  App.hostSeat = App.roster.findIndex(r => r.kind === 'host');
+  App.pickedSeat = -1;
+  renderHost();
+  pushLobbySeats();
+};
+
+/* Click one seat then another to swap their occupants. Works for humans and
+   bots alike, so the host can build whatever two teams they want. */
+UI.on.seatClick = i => {
+  if (!App.roster.length) return;
+  if (App.pickedSeat === -1) App.pickedSeat = i;
+  else if (App.pickedSeat === i) App.pickedSeat = -1;
+  else { const a = App.pickedSeat; App.pickedSeat = -1; swapSeats(a, i); return; }
   renderHost();
 };
 
@@ -655,7 +720,7 @@ UI.on.restart = () => {
     const seats = App.gameHost.engine.players.map(p => ({ name: p.name, isBot: p.isBot }));
     App.gameHost.destroy();
     teardownMatch();
-    const io = makeIo(0, handleMsg, (seat, msg) => {
+    const io = makeIo(App.hostSeat, handleMsg, (seat, msg) => {
       if (seat === null) { for (const [pid] of App.seatOfPeer) App.hostNet.sendTo(pid, msg); }
       else { const pid = App.peerOfSeat.get(seat); if (pid) App.hostNet.sendTo(pid, msg); }
     });

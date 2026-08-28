@@ -120,7 +120,9 @@ sets declared, and no claimed card lingers in a hand.
 
 - 48 cards: a standard deck minus the four 8s, split into 8 half-suits of 6
   (minor 2–7 and major 9–A of each suit).
-- Seats alternate teams: 0/2/4 Blue, 1/3/5 Red.
+- Seats alternate teams: 0/2/4 Blue, 1/3/5 Red. The host assigns teams in the
+  lobby by moving people between seats (tap one seat, tap another to swap) — so
+  the sides are always 3v3 by construction, and bots fill whatever is left.
 - **Asking** — you must hold at least one card of the half-suit, must not hold the
   card you name, and must ask an opponent who still has cards. Hit keeps your turn;
   miss passes it to them.
