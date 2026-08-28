@@ -172,9 +172,12 @@ export function flashBanner() {
 export function showRejoin(sess, lobby) {
   el('rejoinInfo').innerHTML =
     'You were playing at <b>' + esc(sess.hostName) + '</b>&rsquo;s table.' +
-    '<div class="queueNames">Your seat is still being held' +
+    '<div class="queueNames">That table is still running' +
     (lobby && lobby.started ? ' &mdash; the match is in progress.' : '.') + '</div>' +
-    '<div class="queueWait">Rejoin now to take it back from the bot.</div>';
+    '<div class="queueWait">' +
+    (lobby && lobby.vacant
+      ? 'Your seat is being held. Rejoin to take it back from the bot.'
+      : 'Rejoin to try to take your seat back.') + '</div>';
   overlay('rejoinOverlay', true);
 }
 export function hideRejoin() { overlay('rejoinOverlay', false); }

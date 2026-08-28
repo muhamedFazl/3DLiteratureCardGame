@@ -105,6 +105,17 @@ function loadSession() {
   try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); }
   catch (e) { return null; }
 }
+/* The stored ts is the freshness check for the rejoin offer. Without this a
+   match lasting longer than REJOIN_MS would expire its own memory mid-play. */
+let lastTouch = 0;
+function touchSession() {
+  if (!App.online || App.isHost) return;
+  const now = Date.now();
+  if (now - lastTouch < 30000) return;
+  lastTouch = now;
+  if (loadSession()) saveSession({});
+}
+
 function clearSession() {
   try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
 }
@@ -200,6 +211,7 @@ function handleMsg(msg) {
 
     case 'state':
       App.state = msg.state;
+      touchSession();
       UI.refreshScore(App.state);
       UI.refreshSeatStrip(App.state, App.mySeat);
       // hold the ring sweep until the in-flight animation has landed
@@ -535,18 +547,18 @@ function wireClientNet() {
     App.joiningId = null;
     App.mode = 'browsing';
     UI.showQueueView(false);
+    // The host turned us away, so whatever seat we remembered is not ours.
+    clearSession();
     UI.toast(reason, 'bad');
   };
   App.clientNet.onClosed = reason => {
     App.joiningId = null;
-    if (App.mode === 'match') {
-      UI.setMsg(reason + ' — returning to the menu.');
-      setTimeout(() => quitToMenu(), 2200);
-    } else {
+    if (App.mode === 'match' || App.mode === 'queued') handleDrop(reason);
+    else {
       App.mode = 'browsing';
       UI.showQueueView(false);
+      UI.toast(reason, 'bad');
     }
-    UI.toast(reason, 'bad');
   };
   App.clientNet._wired = true;
 }
@@ -598,8 +610,10 @@ function teardownMatch() {
   View.clearTable();
 }
 
-function quitToMenu() {
-  clearSession();
+/** @param forget true when the player chose to leave; false on a dropout,
+    where the seat memory is the whole point of keeping it. */
+function quitToMenu(forget = true) {
+  if (forget) clearSession();
   teardownMatch();
   if (App.hostNet) { App.hostNet.close(); App.hostNet = null; }
   if (App.clientNet) { App.clientNet.leave(); App.clientNet.stopDiscovery(); }
@@ -618,26 +632,75 @@ function quitToMenu() {
    Rejoin — offer to put a returning player back in the seat being held.
    ========================================================================= */
 let pendingRejoin = null;
+let rejoinBusy = false;
+let dropping = false;
+
+const channelAlive = () =>
+  !!(App.clientNet && App.clientNet.ch && App.clientNet.ch.readyState === 'open');
+
+/** True when we ought to have a live peer connection right now. */
+const shouldBeConnected = () =>
+  App.online && !App.isHost && (App.mode === 'match' || App.mode === 'queued');
+
+/** Lost the host involuntarily. Keep the seat memory and offer to go back. */
+function handleDrop(reason) {
+  if (dropping) return;
+  dropping = true;
+  UI.toast(reason || 'Connection to the host lost.', 'bad');
+  // Tell the host over MQTT — that transport is still up even though the peer
+  // connection is gone, so the seat gets held immediately instead of waiting
+  // for ICE to time out.
+  try { if (App.clientNet) App.clientNet.leave(true); } catch (e) {}
+  quitToMenu(false);
+  dropping = false;
+  setTimeout(() => offerRejoin(), 300);
+}
+
+/* Mobile Chrome freezes a backgrounded tab rather than unloading it, so the
+   peer connection dies while the page lives on. Nothing would re-run the
+   rejoin probe on return, so check explicitly whenever we become visible. */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (shouldBeConnected() && !channelAlive()) {
+    handleDrop('Connection dropped while the game was in the background.');
+  } else if (App.mode === 'menu') {
+    offerRejoin();
+  }
+});
 
 async function offerRejoin() {
+  if (rejoinBusy) return;
   const sess = loadSession();
   if (!sess || !sess.lobbyId) return;
   if (Date.now() - (sess.ts || 0) > REJOIN_MS) { clearSession(); return; }
+  if (App.mode !== 'menu') return;
 
-  try { await ensureSignal(); } catch (e) { return; }
+  rejoinBusy = true;
+  try {
+    try { await ensureSignal(); }
+    catch (e) { UI.toast('Could not reach the lobby broker.', 'bad'); return; }
 
-  if (!App.clientNet) App.clientNet = new ClientNet(App.sig, App.netKey, myPeerId());
-  UI.toast('Checking whether your table is still running…');
-  const lobby = await App.clientNet.probeLobby(sess.lobbyId, 6000);
-  UI.toast('');
+    if (!App.clientNet) App.clientNet = new ClientNet(App.sig, App.netKey, myPeerId());
 
-  // Only offer if the table is alive AND a seat is actually being held for
-  // someone — otherwise there is nothing to return to.
-  if (!lobby || !lobby.vacant) { clearSession(); return; }
-  if (App.mode !== 'menu') return;          // they already started doing something
+    // Two passes. The host may not have registered our drop yet — on mobile the
+    // page often dies without firing beforeunload, so the host is still waiting
+    // on an ICE timeout and is briefly advertising vacant:0. Bailing out on the
+    // first look would throw away a seat that is about to open.
+    UI.toast('Checking whether your table is still running…');
+    let lobby = await App.clientNet.probeLobby(sess.lobbyId, 7000);
+    if (lobby && !lobby.vacant && lobby.started) {
+      lobby = await App.clientNet.probeLobby(sess.lobbyId, 7000) || lobby;
+    }
+    UI.toast('');
 
-  pendingRejoin = { sess, lobby };
-  UI.showRejoin(sess, lobby);
+    if (!lobby) { clearSession(); return; }   // table really is gone
+    if (App.mode !== 'menu') return;          // they started doing something else
+
+    pendingRejoin = { sess, lobby };
+    UI.showRejoin(sess, lobby);
+  } finally {
+    rejoinBusy = false;
+  }
 }
 
 UI.on.rejoinYes = () => {
@@ -740,7 +803,15 @@ if (location.hash === '#debug') {
 // Ask about a held seat shortly after boot, once the menu is up.
 setTimeout(() => { offerRejoin(); }, 400);
 
-window.addEventListener('beforeunload', () => {
-  if (App.hostNet) App.hostNet.close();
-  if (App.clientNet) App.clientNet.leave();
-});
+/* Mobile browsers frequently skip beforeunload entirely, so pagehide carries
+   the real notification. Telling the host we are gone lets it hold the seat at
+   once rather than after an ICE timeout. Both are best-effort and idempotent. */
+function announceExit(hard) {
+  // Only tear the table down when the page is genuinely going away. pagehide
+  // also fires when a mobile tab is merely backgrounded, and closing the host's
+  // table because they glanced at another app would end everyone's match.
+  if (hard) { try { if (App.hostNet) App.hostNet.close(); } catch (e) {} }
+  try { if (App.clientNet) App.clientNet.leave(true); } catch (e) {}
+}
+window.addEventListener('pagehide', e => announceExit(!e.persisted));
+window.addEventListener('beforeunload', () => announceExit(true));

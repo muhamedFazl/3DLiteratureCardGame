@@ -58,6 +58,14 @@ locally and known only to that browser and the host — so a seat cannot be clai
 by anyone else. Quitting deliberately clears it; the host is not covered, since
 the host IS the game.
 
+Mobile browsers freeze a backgrounded tab instead of unloading it, so the peer
+connection dies while the page lives on. The client therefore also recovers on
+`visibilitychange`: coming back to a dead channel is treated as a dropout and
+the rejoin offer appears without needing a reload. Departures are announced on
+`pagehide` as well as `beforeunload` (mobile often skips the latter) over MQTT,
+which still works when WebRTC is gone — so the host holds the seat at once
+rather than after an ICE timeout.
+
 ### Connectivity limits
 
 Peer connections use public STUN only, with no TURN relay. Same-Wi-Fi connections
