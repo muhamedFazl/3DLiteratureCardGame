@@ -85,6 +85,14 @@ input:focus, select:focus { border-color:#5b93cc; }
 .chip.rd { color:#ff8080; } .chip.bk { color:#dfe8f2; }
 .chip.sel.rd, .chip.sel.bk { color:#fff; }
 
+.declBlock { margin:10px 0; padding:10px 12px; background:#0c161f;
+  border:1px solid #24374a; border-radius:8px; }
+.declHead { font-size:11px; text-transform:uppercase; letter-spacing:1px;
+  opacity:.6; margin-bottom:7px; }
+.declChips { display:flex; flex-wrap:wrap; gap:6px; }
+.declChip { font-size:15px; font-weight:800; padding:5px 9px;
+  background:#1b2a38; border:1px solid #35516b; border-radius:6px; }
+
 .declRow { display:grid; grid-template-columns:74px 1fr; gap:8px; align-items:center; margin:6px 0; }
 .declCard { font-size:16px; font-weight:800; text-align:center; padding:6px;
   background:#1b2a38; border:1px solid #35516b; border-radius:6px; }

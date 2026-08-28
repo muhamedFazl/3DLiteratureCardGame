@@ -15,7 +15,8 @@ export const on = {
   joinLobby: () => {}, joinCode: () => {}, leaveQueue: () => {}, toggleShowAll: () => {},
   startMatch: () => {}, cancelHost: () => {}, requiredChange: () => {}, shuffleSeats: () => {},
   confirmAsk: () => {}, confirmDeclare: () => {}, restart: () => {}, quitToMenu: () => {},
-  openAsk: () => {}, openDeclare: () => {}, toggleMotion: () => {}
+  openAsk: () => {}, openDeclare: () => {}, toggleMotion: () => {},
+  rejoinYes: () => {}, rejoinNo: () => {}
 };
 
 /* ---------------- screens ---------------- */
@@ -30,9 +31,24 @@ export function toast(text, kind) {
   t.className = 'netStatus' + (kind ? ' ' + kind : '') + (text ? ' show' : '');
 }
 
+const NAME_KEY = 'lit.name';
+
 export function playerName() {
   const v = (el('nameInput').value || '').trim();
   return v ? v.slice(0, 14) : 'Player';
+}
+
+/** Restore the last-used name so a refresh doesn't wipe it. */
+export function restorePlayerName() {
+  let saved = '';
+  try { saved = localStorage.getItem(NAME_KEY) || ''; } catch (e) {}
+  if (saved) el('nameInput').value = saved.slice(0, 14);
+  const persist = () => {
+    try { localStorage.setItem(NAME_KEY, (el('nameInput').value || '').trim().slice(0, 14)); }
+    catch (e) {}
+  };
+  el('nameInput').addEventListener('input', persist);
+  el('nameInput').addEventListener('change', persist);
 }
 
 /* ---------------- lobby browser ---------------- */
@@ -119,6 +135,16 @@ export function flashBanner() {
   void b.offsetWidth;                 // force reflow so the animation restarts
   b.classList.add('missHit');
 }
+
+export function showRejoin(sess, lobby) {
+  el('rejoinInfo').innerHTML =
+    'You were playing at <b>' + esc(sess.hostName) + '</b>&rsquo;s table.' +
+    '<div class="queueNames">Your seat is still being held' +
+    (lobby && lobby.started ? ' &mdash; the match is in progress.' : '.') + '</div>' +
+    '<div class="queueWait">Rejoin now to take it back from the bot.</div>';
+  overlay('rejoinOverlay', true);
+}
+export function hideRejoin() { overlay('rejoinOverlay', false); }
 
 export function setMotionToggle(reduced) {
   const b = el('btnMotion');
@@ -235,13 +261,15 @@ function renderAsk() {
   el('askConfirm').disabled = !ok;
 }
 
-/* ---------------- declare modal ---------------- */
+/* ---------------- declare modal ----------------
+   You name a half-suit; you do NOT say who holds what. Every teammate then
+   surrenders whatever they hold of it automatically. If the six cards are all
+   on your team you score, otherwise the other team does. */
 let declCtx = null;
 
 export function openDeclare(ctx) {
   declCtx = ctx;
-  const { state, hand, mySeat } = ctx;
-  const myTeam = SEAT_TEAM[mySeat];
+  const { state, hand } = ctx;
   const sel = el('declSet');
   sel.innerHTML = '';
   const live = HS_LIST.filter(h => state.claimed[h] === undefined);
@@ -263,27 +291,25 @@ function renderDeclRows() {
   const { state, hand, mySeat } = declCtx;
   const myTeam = SEAT_TEAM[mySeat];
   const hs = el('declSet').value;
-  const box = el('declRows'); box.innerHTML = '';
+  const box = el('declRows');
+  box.innerHTML = '';
   if (!hs) return;
-  const mates = state.seats.filter(s => s.team === myTeam);
-  for (const cid of HS_CARDS[hs]) {
-    const row = document.createElement('div'); row.className = 'declRow';
-    const lbl = document.createElement('div');
-    lbl.className = 'declCard';
-    lbl.style.color = isRed(cid) ? '#ff8080' : '#e6edf5';
-    lbl.textContent = cardLabel(cid);
-    const sel = document.createElement('select');
-    sel.dataset.card = cid;
-    for (const m of mates) {
-      const o = document.createElement('option');
-      o.value = m.seat;
-      o.textContent = m.name + (m.seat === mySeat ? ' (you)' : '');
-      sel.appendChild(o);
-    }
-    if (hand.includes(cid)) sel.value = String(mySeat);
-    row.appendChild(lbl); row.appendChild(sel);
-    box.appendChild(row);
-  }
+
+  const mine = HS_CARDS[hs].filter(c => hand.includes(c));
+  const missing = HS_CARDS[hs].filter(c => !hand.includes(c));
+  const mates = state.seats.filter(s => s.team === myTeam && s.seat !== mySeat);
+
+  const chips = list => list.length
+    ? list.map(c => '<span class="declChip" style="color:' +
+        (isRed(c) ? '#ff8080' : '#e6edf5') + '">' + cardLabel(c) + '</span>').join('')
+    : '<span class="dim">none</span>';
+
+  box.innerHTML =
+    '<div class="declBlock"><div class="declHead">You surrender</div>' +
+    '<div class="declChips">' + chips(mine) + '</div></div>' +
+    '<div class="declBlock"><div class="declHead">' +
+    mates.map(m => esc(m.name)).join(' and ') + ' must hold every one of these</div>' +
+    '<div class="declChips">' + chips(missing) + '</div></div>';
 }
 
 /* ---------------- game over ---------------- */
@@ -328,6 +354,8 @@ export function wire() {
   el('btnDeclare').onclick = () => on.openDeclare();
   el('btnQuit').onclick = () => on.quitToMenu();
   el('btnMotion').onclick = () => on.toggleMotion();
+  el('rejoinYes').onclick = () => on.rejoinYes();
+  el('rejoinNo').onclick = () => on.rejoinNo();
 
   el('askCancel').onclick = closeAsk;
   el('askConfirm').onclick = () => {
@@ -340,12 +368,8 @@ export function wire() {
   el('declConfirm').onclick = () => {
     const hs = el('declSet').value;
     if (!hs) return;
-    const assignment = {};
-    el('declRows').querySelectorAll('select').forEach(s => {
-      assignment[s.dataset.card] = parseInt(s.value, 10);
-    });
     closeDeclare();
-    on.confirmDeclare(hs, assignment);
+    on.confirmDeclare(hs);
   };
 
   el('goRestart').onclick = () => { overlay('gameOver', false); on.restart(); };

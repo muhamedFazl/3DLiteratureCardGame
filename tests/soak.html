@@ -65,8 +65,8 @@ function playOne(errs) {
     const cl = botFindCertainClaim(g, kn, seat);
     if (cl) {
       // a bot that claims certainty must never be wrong
-      if (!g.validateClaim(seat, cl.hs, cl.assignment)) errs.push('CERTAIN CLAIM WAS WRONG');
-      g.applyClaim(seat, cl.hs, cl.assignment);
+      if (!g.validateClaim(seat, cl.hs)) errs.push('CERTAIN CLAIM WAS WRONG');
+      g.applyClaim(seat, cl.hs);
       kn.dropSet(cl.hs);
       continue;
     }
@@ -79,7 +79,7 @@ function playOne(errs) {
       continue;
     }
     const f = botForcedClaim(g, kn, seat);
-    if (f) { g.applyClaim(seat, f.hs, f.assignment); kn.dropSet(f.hs); continue; }
+    if (f) { g.applyClaim(seat, f.hs); kn.dropSet(f.hs); continue; }
     break;
   }
 

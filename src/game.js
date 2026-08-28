@@ -109,7 +109,7 @@ export class GameHost {
     this.kn.infer(e);
 
     const claim = botFindCertainClaim(e, this.kn, seat);
-    if (claim) return this.resolveClaim(seat, claim.hs, claim.assignment);
+    if (claim) return this.resolveClaim(seat, claim.hs);
 
     const ask = botChooseAsk(e, this.kn, seat);
     if (ask) return this.resolveAsk(seat, ask.target, ask.card);
@@ -117,7 +117,7 @@ export class GameHost {
     const forced = botForcedClaim(e, this.kn, seat);
     if (forced) {
       this._ev('sys', bot.name + ' has no legal ask and must declare.');
-      return this.resolveClaim(seat, forced.hs, forced.assignment);
+      return this.resolveClaim(seat, forced.hs);
     }
     e.turn = e.findTurnHolder(seat);
     if (e.turn < 0) return this.finish();
@@ -142,7 +142,7 @@ export class GameHost {
         this.io.sendTo(seat, { k: 'reject', reason: 'That half-suit is already claimed.' });
         return;
       }
-      this.resolveClaim(seat, msg.hs, msg.assignment || {});
+      this.resolveClaim(seat, msg.hs);
     }
   }
 
@@ -164,19 +164,29 @@ export class GameHost {
     this._later(() => this.checkWin(), hit ? PACE.AFTER_HIT : PACE.AFTER_MISS);
   }
 
-  resolveClaim(callerSeat, hs, assignment) {
+  resolveClaim(callerSeat, hs) {
     const e = this.engine;
     const caller = e.players[callerSeat];
-    const { correct, winTeam, truth } = e.applyClaim(callerSeat, hs, assignment);
+    const team = caller.team;
+    // holdings is snapshotted before the cards leave play
+    const { correct, winTeam, truth, holdings } = e.applyClaim(callerSeat, hs);
     this.kn.dropSet(hs);
     this.kn.infer(e);
 
     const verdict = correct ? 'CORRECT' : 'WRONG';
     this._ev('claim',
       caller.name + ' declared ' + HS_NAME[hs] + ' — ' + verdict + '. Point to ' + TEAM_NAME[winTeam] + '.',
-      { hs, truth, correct, winTeam, caller: callerSeat });
-    this._ev('sys', '   Actual: ' + Object.keys(truth)
-      .map(c => cardLabel(c) + '→' + (truth[c] < 0 ? '—' : e.players[truth[c]].name)).join(', '));
+      { hs, truth, correct, winTeam, caller: callerSeat, holdings });
+
+    // Every teammate surrenders what they held; then whatever the other team
+    // was sitting on, which is what sank the claim.
+    const ours = [], theirs = [];
+    for (const s of Object.keys(holdings)) {
+      const line = e.players[s].name + ': ' + holdings[s].map(cardLabel).join(' ');
+      (SEAT_TEAM[s] === team ? ours : theirs).push(line);
+    }
+    this._ev('sys', '   Submitted — ' + (ours.length ? ours.join(' · ') : 'nobody held any'));
+    if (theirs.length) this._ev('sys', '   Held by the other team — ' + theirs.join(' · '));
 
     this._pushHands();
     this._pushState();
@@ -194,6 +204,21 @@ export class GameHost {
     this.engine.over = true;
     this._pushState();
     this.io.broadcast({ k: 'over', scores: this.engine.scores.slice() });
+  }
+
+  /** Re-seat a returning player and bring them fully back up to date. */
+  restoreHuman(seat, name) {
+    const p = this.engine.players[seat];
+    if (!p) return;
+    p.isBot = false;
+    if (name) p.name = name;
+    this._ev('sys', p.name + ' reconnected.');
+    this.io.sendTo(seat, {
+      k: 'welcome', mySeat: seat, seats: this.engine.publicState().seats
+    });
+    this.io.sendTo(seat, { k: 'hand', hand: p.hand.slice() });
+    this._pushState();
+    this.io.sendTo(seat, { k: 'turn', seat: this.engine.turn });
   }
 
   /** A human dropped out mid-match — hand the seat to a bot. */

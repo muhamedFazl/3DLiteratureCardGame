@@ -59,6 +59,18 @@
   </div>
 </div>
 
+<!-- ============================ REJOIN PROMPT ======================== -->
+<div class="modalWrap" id="rejoinOverlay">
+  <div class="modal" style="width:420px">
+    <h2>Welcome back</h2>
+    <div class="queueBox" id="rejoinInfo"></div>
+    <div class="modalFoot">
+      <button id="rejoinNo">No thanks</button>
+      <button id="rejoinYes" class="primary">Rejoin</button>
+    </div>
+  </div>
+</div>
+
 <!-- ============================ HOST PANEL =========================== -->
 <div class="modalWrap" id="hostOverlay">
   <div class="modal">
@@ -146,9 +158,10 @@
     <h2>Declare a Half-Suit</h2>
     <label>Half-suit to claim</label>
     <select id="declSet"></select>
-    <label>Assign every card to a member of your team</label>
     <div id="declRows"></div>
-    <div class="warn">All six assignments must be exactly right. One mistake hands the set to the other team.</div>
+    <div class="warn">Your teammates automatically surrender everything they hold of this
+      half-suit. If the six cards are all on your team you score — if even one is with an
+      opponent, the other team does.</div>
     <div class="modalFoot">
       <button id="declCancel">Cancel</button>
       <button id="declConfirm" class="danger">Submit Claim</button>
@@ -169,9 +182,10 @@
       already hold at least one card of that half-suit, and you must not hold the card
       you ask for. If they have it, it moves to you and you go again. If not, the turn
       passes to them.</p>
-      <p><b>Declaring.</b> At any point on your turn you may claim a half-suit by naming
-      which of your teammates holds each of its six cards. All six right — your team
-      scores. One wrong — the other team scores. Either way those cards leave play.</p>
+      <p><b>Declaring.</b> At any point on your turn you may claim a half-suit. You name
+      the set only — your teammates then surrender everything they hold of it. If your
+      team holds all six between you, you score. If even one card is with an opponent,
+      the other team scores. Either way those cards leave play.</p>
       <p><b>Winning.</b> First team past four half-suits takes the match.</p>
       <p><b>Controls.</b> Left-click a card to inspect it or an opponent to ask them.
       Right-drag orbits the table, scroll zooms.</p>

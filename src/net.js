@@ -31,6 +31,8 @@ const RTC_CFG = {
 
 const BEACON_MS = 2500;
 const LOBBY_TTL = 9000;
+/** How long a seat stays reclaimable after its player drops. */
+export const REJOIN_MS = 10 * 60 * 1000;
 
 export const randomId = (n = 8) =>
   Array.from({ length: n }, () => 'abcdefghijkmnpqrstuvwxyz23456789'[Math.floor(Math.random() * 32)]).join('');
@@ -197,9 +199,14 @@ export class HostNet {
     this.code = randomCode();
     this.info = Object.assign({ name: 'Literature table', hostName: 'Host', required: 2 }, info);
     this.peers = new Map();      // peerId -> {pc, ch, name, pending:[]}
+    // Seats whose player dropped mid-match, held open for REJOIN_MS.
+    // Keyed by peerId, which is a random secret only that client and we know —
+    // so it doubles as the resume credential and never goes on the wire in clear.
+    this.vacant = new Map();     // peerId -> {seat, name, ts}
     this.open = false;
     this.started = false;
     this.onJoin = () => {};
+    this.onRejoin = () => {};
     this.onLeave = () => {};
     this.onMessage = () => {};
     this._beacon = null;
@@ -223,11 +230,22 @@ export class HostNet {
       required: this.info.required,
       queued: this.humanCount(),
       players: [this.info.hostName, ...[...this.peers.values()].filter(p => p.ch).map(p => p.name)],
-      started: this.started, live: true, ts: Date.now()
+      started: this.started, vacant: this._pruneVacant(), live: true, ts: Date.now()
     });
   }
 
   humanCount() { return 1 + [...this.peers.values()].filter(p => p.ch).length; }
+
+  /** Hold this player's seat open so they can come back to it. */
+  markVacant(peerId, seat, name) {
+    this.vacant.set(peerId, { seat, name, ts: Date.now() });
+    this._publishBeacon();
+  }
+  _pruneVacant() {
+    const now = Date.now();
+    for (const [id, v] of this.vacant) if (now - v.ts > REJOIN_MS) this.vacant.delete(id);
+    return this.vacant.size;
+  }
 
   setRequired(n) { this.info.required = n; this._publishBeacon(); }
 
@@ -236,16 +254,27 @@ export class HostNet {
     const topic = `${BASE}/sig/${this.id}/${m.from}`;
 
     if (m.t === 'offer') {
-      if (this.started) { this.sig.pub(topic, { t: 'reject', reason: 'Match already started' }); return; }
-      if (this.humanCount() >= 6) { this.sig.pub(topic, { t: 'reject', reason: 'Table is full' }); return; }
+      this._pruneVacant();
+      const vac = this.vacant.get(m.from);          // a seat we are holding for them
+      if (this.started && !vac) {
+        this.sig.pub(topic, { t: 'reject', reason: 'Match already started' }); return;
+      }
+      if (!vac && this.humanCount() >= 6) {
+        this.sig.pub(topic, { t: 'reject', reason: 'Table is full' }); return;
+      }
       if (this.peers.has(m.from)) return;
 
-      const entry = { pc: null, ch: null, name: (m.name || 'Player').slice(0, 14), pending: [] };
+      const entry = {
+        pc: null, ch: null,
+        name: vac ? vac.name : (m.name || 'Player').slice(0, 14),
+        pending: []
+      };
       const { pc, wire } = newPeer(
         cand => this.sig.pub(topic, { t: 'ice', from: 'host', candidate: cand }),
         ch => {
           entry.ch = ch;
-          this.onJoin(m.from, entry.name);
+          if (vac) { this.vacant.delete(m.from); this.onRejoin(m.from, entry.name, vac.seat); }
+          else this.onJoin(m.from, entry.name);
           this._publishBeacon();
         },
         data => this.onMessage(m.from, data),
@@ -311,10 +340,12 @@ export class HostNet {
 
 /* ---------------- CLIENT ---------------- */
 export class ClientNet {
-  constructor(sig, netKey) {
+  constructor(sig, netKey, peerId) {
     this.sig = sig;
     this.netKey = netKey;
-    this.peerId = randomId(10);
+    // Reusing the same peerId across a reload is what lets the host recognise
+    // us and give back the seat it was holding.
+    this.peerId = peerId || randomId(10);
     this.lobbies = new Map();
     this.onLobbies = () => {};
     this.onMessage = () => {};
@@ -353,12 +384,35 @@ export class ClientNet {
     this._scanTopic = null; this._sweep = null;
   }
 
+  /** Listen across every network bucket for one specific lobby id.
+      Resolves with the beacon, or null on timeout. */
+  probeLobby(lobbyId, timeoutMs) {
+    return new Promise(resolve => {
+      const topic = `${BASE}/net/+/lobbies`;
+      let settled = false;
+      const finish = v => {
+        if (settled) return;
+        settled = true;
+        this.sig.unsub(topic, cb);
+        clearTimeout(timer);
+        resolve(v);
+      };
+      const cb = m => {
+        if (m && m.t === 'lobby' && m.id === lobbyId) {
+          finish(m.live === false ? null : m);
+        }
+      };
+      this.sig.sub(topic, cb);
+      const timer = setTimeout(() => finish(null), timeoutMs || 6000);
+    });
+  }
+
   findByCode(code) {
     for (const l of this.lobbies.values()) if (l.code === code.toUpperCase()) return l;
     return null;
   }
 
-  join(lobby, name) {
+  join(lobby, name, resume) {
     this.lobby = lobby;
     this._sigTopic = `${BASE}/sig/${lobby.id}/${this.peerId}`;
     const hostTopic = `${BASE}/sig/${lobby.id}/host`;
@@ -392,7 +446,9 @@ export class ClientNet {
 
     pc.createOffer()
       .then(o => pc.setLocalDescription(o))
-      .then(() => this.sig.pub(hostTopic, { t: 'offer', from: this.peerId, name, sdp: pc.localDescription.sdp }))
+      .then(() => this.sig.pub(hostTopic, {
+        t: 'offer', from: this.peerId, name, resume: !!resume, sdp: pc.localDescription.sdp
+      }))
       .catch(() => this.onClosed('Could not create offer'));
 
     // if the handshake never completes, surface it rather than hanging

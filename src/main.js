@@ -12,7 +12,7 @@ import {
 } from './engine.js';
 import * as View from './view.js';
 import * as UI from './ui.js';
-import { Signal, HostNet, ClientNet, getNetKey } from './net.js';
+import { Signal, HostNet, ClientNet, getNetKey, randomId, REJOIN_MS } from './net.js';
 import { GameHost, makeIo, PACE } from './game.js';
 
 /* ---------------- app state ---------------- */
@@ -62,6 +62,7 @@ View.initView(document.getElementById('app'), {
   }
 });
 UI.wire();
+UI.restorePlayerName();
 UI.showScreen('menu');
 
 /* Respect the OS preference by default, but let it be overridden either way:
@@ -80,6 +81,38 @@ UI.on.toggleMotion = () => {
   localStorage.setItem('lit.motion', next);
   applyMotionPref();
 };
+
+/* =========================================================================
+   Reconnect memory. We remember which lobby we were in and, crucially, the
+   peerId we used — the host holds our seat against that same id, so reusing
+   it is what proves we are the same player coming back.
+   ========================================================================= */
+const SESSION_KEY = 'lit.session';
+
+function saveSession(patch) {
+  try {
+    const cur = loadSession() || {};
+    localStorage.setItem(SESSION_KEY, JSON.stringify(
+      Object.assign(cur, patch, { ts: Date.now() })));
+  } catch (e) {}
+}
+function loadSession() {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); }
+  catch (e) { return null; }
+}
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+}
+/** A stable per-browser id, reused across reloads so the host recognises us. */
+function myPeerId() {
+  let id = '';
+  try { id = localStorage.getItem('lit.peerId') || ''; } catch (e) {}
+  if (!id) {
+    id = randomId(10);
+    try { localStorage.setItem('lit.peerId', id); } catch (e) {}
+  }
+  return id;
+}
 
 const nameOf = seat => (App.state && App.state.seats[seat]) ? App.state.seats[seat].name : 'Seat ' + seat;
 
@@ -136,6 +169,10 @@ function handleMsg(msg) {
       UI.overlay('gameOver', false);
       UI.showScreen('hud');
       UI.toast('');
+      if (App.online && !App.isHost && App.clientNet && App.clientNet.lobby) {
+        const l = App.clientNet.lobby;
+        saveSession({ lobbyId: l.id, code: l.code, hostName: l.host, netKey: App.netKey });
+      }
       document.getElementById('goRestart').style.display =
         (App.online && !App.isHost) ? 'none' : '';
       break;
@@ -194,6 +231,7 @@ function handleMsg(msg) {
 
     case 'over':
       endAnim();
+      clearSession();                       // nothing left to come back to
       UI.setTitle('Match complete'); UI.setMsg('');
       UI.log('Match over. Blue ' + msg.scores[0] + ' — Red ' + msg.scores[1] + '.', 'cl');
       setTimeout(() => UI.showOver(msg.scores, App.mySeat), 600);
@@ -322,13 +360,24 @@ async function startHosting() {
     UI.log(name + ' joined the queue.', 'sys');
     renderHost();
   };
+  App.hostNet.onRejoin = (peerId, name, seat) => {
+    App.seatOfPeer.set(peerId, seat);
+    App.peerOfSeat.set(seat, peerId);
+    // restoreHuman broadcasts the 'reconnected' line to every client already
+    if (App.gameHost) App.gameHost.restoreHuman(seat, name);
+    renderHost();
+  };
   App.hostNet.onLeave = peerId => {
     const i = App.seatOrder.findIndex(p => p.peerId === peerId);
     if (i >= 0) App.seatOrder.splice(i, 1);
     if (App.mode === 'match' && App.seatOfPeer.has(peerId)) {
       const seat = App.seatOfPeer.get(peerId);
+      // Capture the name BEFORE convertToBot appends " (bot)", so the seat can
+      // be handed back under the player's own name if they return.
+      const original = App.gameHost ? App.gameHost.engine.players[seat].name : 'Player';
       App.seatOfPeer.delete(peerId);
       App.peerOfSeat.delete(seat);
+      App.hostNet.markVacant(peerId, seat, original);
       if (App.gameHost) App.gameHost.convertToBot(seat);
     }
     renderHost();
@@ -404,6 +453,52 @@ function startHostedMatch() {
 /* =========================================================================
    Joining
    ========================================================================= */
+/* Client callbacks live here so both the lobby browser and the rejoin
+   flow can share one wired ClientNet. */
+function wireClientNet() {
+  if (App.clientNet && App.clientNet._wired) return;
+  if (!App.clientNet) App.clientNet = new ClientNet(App.sig, App.netKey, myPeerId());
+  App.clientNet.onLobbies = list => {
+    if (App.mode === 'browsing') UI.renderLobbies(list, App.joiningId);
+    if (App.mode === 'queued' && App.clientNet.lobby) {
+      const mine = list.find(l => l.id === App.clientNet.lobby.id);
+      if (mine) UI.updateQueueView(mine);
+    }
+  };
+  App.clientNet.onMessage = handleMsg;
+  App.clientNet.onJoined = () => {
+    App.mode = 'queued';
+    App.joiningId = null;
+    const l = App.clientNet.lobby;
+    if (l) saveSession({ lobbyId: l.id, code: l.code, hostName: l.host, netKey: App.netKey });
+    UI.toast('Connected to the table — waiting for the host.', 'good');
+    UI.showQueueView(true, {
+      name: App.clientNet.lobby.name,
+      queued: App.clientNet.lobby.queued,
+      required: App.clientNet.lobby.required,
+      players: App.clientNet.lobby.players || []
+    });
+  };
+  App.clientNet.onRejected = reason => {
+    App.joiningId = null;
+    App.mode = 'browsing';
+    UI.showQueueView(false);
+    UI.toast(reason, 'bad');
+  };
+  App.clientNet.onClosed = reason => {
+    App.joiningId = null;
+    if (App.mode === 'match') {
+      UI.setMsg(reason + ' — returning to the menu.');
+      setTimeout(() => quitToMenu(), 2200);
+    } else {
+      App.mode = 'browsing';
+      UI.showQueueView(false);
+    }
+    UI.toast(reason, 'bad');
+  };
+  App.clientNet._wired = true;
+}
+
 async function startBrowsing() {
   UI.overlay('joinOverlay', true);
   UI.showQueueView(false);
@@ -420,45 +515,7 @@ async function startBrowsing() {
   App.online = true;
   App.isHost = false;
 
-  if (!App.clientNet) {
-    App.clientNet = new ClientNet(App.sig, App.netKey);
-    App.clientNet.onLobbies = list => {
-      if (App.mode === 'browsing') UI.renderLobbies(list, App.joiningId);
-      if (App.mode === 'queued' && App.clientNet.lobby) {
-        const mine = list.find(l => l.id === App.clientNet.lobby.id);
-        if (mine) UI.updateQueueView(mine);
-      }
-    };
-    App.clientNet.onMessage = handleMsg;
-    App.clientNet.onJoined = () => {
-      App.mode = 'queued';
-      App.joiningId = null;
-      UI.toast('Connected to the table — waiting for the host.', 'good');
-      UI.showQueueView(true, {
-        name: App.clientNet.lobby.name,
-        queued: App.clientNet.lobby.queued,
-        required: App.clientNet.lobby.required,
-        players: App.clientNet.lobby.players || []
-      });
-    };
-    App.clientNet.onRejected = reason => {
-      App.joiningId = null;
-      App.mode = 'browsing';
-      UI.showQueueView(false);
-      UI.toast(reason, 'bad');
-    };
-    App.clientNet.onClosed = reason => {
-      App.joiningId = null;
-      if (App.mode === 'match') {
-        UI.setMsg(reason + ' — returning to the menu.');
-        setTimeout(() => quitToMenu(), 2200);
-      } else {
-        App.mode = 'browsing';
-        UI.showQueueView(false);
-      }
-      UI.toast(reason, 'bad');
-    };
-  }
+  wireClientNet();
   App.clientNet.discover(App.showAll);
 }
 
@@ -471,6 +528,7 @@ function joinLobby(lobby) {
 }
 
 function leaveQueue() {
+  clearSession();                           // leaving on purpose is not a dropout
   if (App.clientNet) App.clientNet.leave();
   App.joiningId = null;
   if (App.mode === 'queued') App.mode = 'browsing';
@@ -488,6 +546,7 @@ function teardownMatch() {
 }
 
 function quitToMenu() {
+  clearSession();
   teardownMatch();
   if (App.hostNet) { App.hostNet.close(); App.hostNet = null; }
   if (App.clientNet) { App.clientNet.leave(); App.clientNet.stopDiscovery(); }
@@ -501,6 +560,50 @@ function quitToMenu() {
   UI.showScreen('menu');
   UI.toast('');
 }
+
+/* =========================================================================
+   Rejoin — offer to put a returning player back in the seat being held.
+   ========================================================================= */
+let pendingRejoin = null;
+
+async function offerRejoin() {
+  const sess = loadSession();
+  if (!sess || !sess.lobbyId) return;
+  if (Date.now() - (sess.ts || 0) > REJOIN_MS) { clearSession(); return; }
+
+  try { await ensureSignal(); } catch (e) { return; }
+
+  if (!App.clientNet) App.clientNet = new ClientNet(App.sig, App.netKey, myPeerId());
+  UI.toast('Checking whether your table is still running…');
+  const lobby = await App.clientNet.probeLobby(sess.lobbyId, 6000);
+  UI.toast('');
+
+  // Only offer if the table is alive AND a seat is actually being held for
+  // someone — otherwise there is nothing to return to.
+  if (!lobby || !lobby.vacant) { clearSession(); return; }
+  if (App.mode !== 'menu') return;          // they already started doing something
+
+  pendingRejoin = { sess, lobby };
+  UI.showRejoin(sess, lobby);
+}
+
+UI.on.rejoinYes = () => {
+  UI.hideRejoin();
+  if (!pendingRejoin) return;
+  const { lobby } = pendingRejoin;
+  pendingRejoin = null;
+  App.mode = 'browsing';
+  App.online = true;
+  App.isHost = false;
+  wireClientNet();
+  UI.toast('Reconnecting…');
+  App.clientNet.join(lobby, UI.playerName(), true);
+};
+UI.on.rejoinNo = () => {
+  UI.hideRejoin();
+  pendingRejoin = null;
+  clearSession();
+};
 
 /* =========================================================================
    Callbacks
@@ -544,7 +647,7 @@ UI.on.openDeclare = () => {
   UI.openDeclare({ state: App.state, hand: App.myHand, mySeat: App.mySeat });
 };
 UI.on.confirmAsk = (target, card) => sendAction({ k: 'ask', target, card });
-UI.on.confirmDeclare = (hs, assignment) => sendAction({ k: 'declare', hs, assignment });
+UI.on.confirmDeclare = hs => sendAction({ k: 'declare', hs });
 
 UI.on.restart = () => {
   if (!App.online) { startBotsMatch(); return; }
@@ -568,6 +671,9 @@ UI.on.quitToMenu = quitToMenu;
 if (location.hash === '#debug') {
   window.__LIT = { App, UI, View, sendAction, canAct };
 }
+
+// Ask about a held seat shortly after boot, once the menu is up.
+setTimeout(() => { offerRejoin(); }, 400);
 
 window.addEventListener('beforeunload', () => {
   if (App.hostNet) App.hostNet.close();

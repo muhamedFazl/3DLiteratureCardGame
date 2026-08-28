@@ -110,17 +110,26 @@ export class Engine {
     return false;
   }
 
-  /** assignment: { cardId: seat } */
-  validateClaim(callerSeat, hs, assignment) {
+  /** A claim succeeds when the caller's team collectively holds all six cards
+      of the half-suit. Which teammate holds which does not matter — every
+      teammate simply surrenders whatever they hold of that set. */
+  validateClaim(callerSeat, hs) {
     if (!this.hsLive(hs)) return false;
     const team = this.players[callerSeat].team;
-    for (const cid of HS_CARDS[hs]) {
-      const declared = assignment[cid];
-      if (declared === undefined || declared === null) return false;
-      if (SEAT_TEAM[declared] !== team) return false;
-      if (this.ownerOf(cid) !== declared) return false;
+    return HS_CARDS[hs].every(cid => {
+      const o = this.ownerOf(cid);
+      return o >= 0 && SEAT_TEAM[o] === team;
+    });
+  }
+
+  /** What each seat surrenders for this half-suit: { seat: [cardId, ...] }. */
+  holdingsFor(hs) {
+    const out = {};
+    for (const p of this.players) {
+      const held = p.hand.filter(c => CARD_HS[c] === hs);
+      if (held.length) out[p.seat] = held.slice();
     }
-    return true;
+    return out;
   }
 
   applyAsk(askerSeat, targetSeat, cid) {
@@ -137,13 +146,14 @@ export class Engine {
     return { hit };
   }
 
-  applyClaim(callerSeat, hs, assignment) {
+  applyClaim(callerSeat, hs) {
     const caller = this.players[callerSeat];
-    const correct = this.validateClaim(callerSeat, hs, assignment);
+    const correct = this.validateClaim(callerSeat, hs);
     const winTeam = correct ? caller.team : (1 - caller.team);
 
     const truth = {};
     for (const cid of HS_CARDS[hs]) truth[cid] = this.ownerOf(cid);
+    const holdings = this.holdingsFor(hs);
 
     this.claimed[hs] = winTeam;
     this.claimedSets[winTeam].push(hs);
@@ -151,7 +161,7 @@ export class Engine {
     for (const p of this.players) p.hand = p.hand.filter(c => CARD_HS[c] !== hs);
     this.turn = callerSeat;
 
-    return { correct, winTeam, truth };
+    return { correct, winTeam, truth, holdings };
   }
 
   /** Prefer a teammate holding cards, else anyone holding cards, else -1. */
@@ -278,44 +288,37 @@ function belief(engine, kn, seat, cid) {
   return kn.knownOwner(cid);
 }
 
-/** A claim the bot is 100% certain of, or null. */
+/** A claim the bot is 100% certain of, or null. Under the collective rule a bot
+    only needs to know every card sits SOMEWHERE on its team — not where. */
 export function botFindCertainClaim(engine, kn, seat) {
   const team = engine.players[seat].team;
   for (const hs of HS_LIST) {
     if (!engine.hsLive(hs)) continue;
-    const assignment = {};
-    let ok = true;
-    for (const cid of HS_CARDS[hs]) {
+    const ok = HS_CARDS[hs].every(cid => {
       const o = belief(engine, kn, seat, cid);
-      if (o < 0 || SEAT_TEAM[o] !== team) { ok = false; break; }
-      assignment[cid] = o;
-    }
-    if (ok) return { hs, assignment };
+      return o >= 0 && SEAT_TEAM[o] === team;
+    });
+    if (ok) return { hs };
   }
   return null;
 }
 
-/** Best-effort claim, used only when no legal ask exists. */
+/** Best-effort claim, used only when no legal ask exists. Picks whichever live
+    half-suit its team most plausibly holds outright. */
 export function botForcedClaim(engine, kn, seat) {
   const team = engine.players[seat].team;
-  const mates = engine.players.filter(p => p.team === team);
   let best = null, bestScore = -Infinity;
 
   for (const hs of HS_LIST) {
     if (!engine.hsLive(hs)) continue;
     let score = 0;
-    const assignment = {};
     for (const cid of HS_CARDS[hs]) {
       const o = belief(engine, kn, seat, cid);
-      if (o >= 0 && SEAT_TEAM[o] === team) { assignment[cid] = o; score += 2; }
-      else if (o >= 0) { assignment[cid] = seat; score -= 3; }
-      else {
-        const cand = mates.filter(m => m.hand.length && !kn.not[m.seat].has(cid));
-        const pick = cand.length ? cand[Math.floor(Math.random() * cand.length)] : mates[0];
-        assignment[cid] = pick.seat;
-      }
+      if (o >= 0 && SEAT_TEAM[o] === team) score += 2;   // known ours
+      else if (o >= 0) score -= 3;                       // known theirs — fatal
+      else score -= 0.5;                                 // unknown — a gamble
     }
-    if (score > bestScore) { bestScore = score; best = { hs, assignment }; }
+    if (score > bestScore) { bestScore = score; best = { hs }; }
   }
   return best;
 }

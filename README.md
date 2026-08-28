@@ -49,6 +49,15 @@ Opening devtools as a joining player reveals nothing about anyone else's cards.
 The host does hold full state — as the machine running the simulation, it must. A
 host could in principle inspect it. Play with people you'd play cards with in person.
 
+### Reconnecting
+
+A player who drops out mid-match (closed tab, crash, lost Wi-Fi) has their seat
+held open for 10 minutes while a bot plays it. Reopening the game offers to put
+them back. The credential is the client'''s own `peerId` — a random value stored
+locally and known only to that browser and the host — so a seat cannot be claimed
+by anyone else. Quitting deliberately clears it; the host is not covered, since
+the host IS the game.
+
 ### Connectivity limits
 
 Peer connections use public STUN only, with no TURN relay. Same-Wi-Fi connections
@@ -115,8 +124,10 @@ sets declared, and no claimed card lingers in a hand.
 - **Asking** — you must hold at least one card of the half-suit, must not hold the
   card you name, and must ask an opponent who still has cards. Hit keeps your turn;
   miss passes it to them.
-- **Declaring** — name the holder of all six cards across your team. All six right
-  scores for you; one wrong scores for them. Either way the set leaves play.
+- **Declaring** — name a half-suit. You do NOT say who holds what: every teammate
+  automatically surrenders whatever they hold of it. If your team holds all six
+  between you, you score; if even one is with an opponent, they do. Either way the
+  set leaves play.
 - A player with no cards can't be asked, and their turn slides to a teammate.
 - First team past four half-suits wins.
 
@@ -126,8 +137,8 @@ Bots reason from **publicly observable information only** — who asked for what
 what that implies — never from hidden hands. On top of that they run a deductive
 closure: empty hands hold nothing; a card excluded from five seats sits at the
 sixth; when a player's known cards equal their hand size, everything else is
-excluded. A bot declares only when all six locations are certain, and falls back to
-a best-guess declaration when it has no legal ask left.
+excluded. A bot declares only when it is certain all six cards sit somewhere on its own
+team, and falls back to a best-guess declaration when it has no legal ask left.
 
 ## Credits
 
