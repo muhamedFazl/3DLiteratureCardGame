@@ -12,9 +12,12 @@ import {
   botChooseAsk, botFindCertainClaim, botForcedClaim, noteAsk
 } from './engine.js';
 
+/* Windows the host waits before advancing state. These must comfortably
+   exceed the client-side animation they cover, with margin for network
+   jitter: transfer is 1080ms, miss is 560ms. */
 export const PACE = {
-  BOT_THINK: 1100,
-  AFTER_HIT: 1700,
+  BOT_THINK: 750,
+  AFTER_HIT: 1450,
   AFTER_MISS: 1300,
   AFTER_CLAIM: 2600,
   DEAL: 2600
@@ -93,7 +96,7 @@ export class GameHost {
     this.io.broadcast({ k: 'turn', seat: e.turn });
 
     const p = e.players[e.turn];
-    if (p.isBot) this._later(() => this.botMove(p.seat), PACE.BOT_THINK + Math.random() * 500);
+    if (p.isBot) this._later(() => this.botMove(p.seat), PACE.BOT_THINK + Math.random() * 300);
   }
 
   botMove(seat) {

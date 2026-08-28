@@ -36,7 +36,10 @@ const App = {
   animating: false,
   dealing: false,
   joiningId: null,
-  showAll: false
+  showAll: false,
+  // derived locally from public events only — identical on all six clients
+  streak: 0,
+  streakSeat: -1
 };
 
 /* ---------------- boot ---------------- */
@@ -61,11 +64,51 @@ View.initView(document.getElementById('app'), {
 UI.wire();
 UI.showScreen('menu');
 
+/* Respect the OS preference by default, but let it be overridden either way:
+   plenty of people who need this have never set the system flag. */
+const RM_QUERY = window.matchMedia('(prefers-reduced-motion: reduce)');
+function applyMotionPref() {
+  const stored = localStorage.getItem('lit.motion');
+  const reduce = stored === 'off' || (stored !== 'on' && RM_QUERY.matches);
+  View.setReducedMotion(reduce);
+  UI.setMotionToggle(reduce);
+}
+if (RM_QUERY.addEventListener) RM_QUERY.addEventListener('change', applyMotionPref);
+applyMotionPref();
+UI.on.toggleMotion = () => {
+  const next = View.isReducedMotion() ? 'on' : 'off';   // 'on' = motion enabled
+  localStorage.setItem('lit.motion', next);
+  applyMotionPref();
+};
+
 const nameOf = seat => (App.state && App.state.seats[seat]) ? App.state.seats[seat].name : 'Seat ' + seat;
 
 function canAct() {
   return App.mode === 'match' && App.state && !App.state.over &&
     App.state.turn === App.mySeat && !App.animating && !App.dealing;
+}
+
+/* Animations are driven by requestAnimationFrame, which browsers pause in a
+   backgrounded tab — so a tween's completion callback may never fire. Without
+   a watchdog the client's controls would stay disabled, and if it were that
+   player's turn the whole match would wait on them. The host's timers keep
+   running regardless, so we force the flag down a little after the host has
+   already moved on. */
+let animGuard = null;
+function beginAnim(maxMs) {
+  App.animating = true;
+  if (animGuard) clearTimeout(animGuard);
+  animGuard = setTimeout(() => {
+    animGuard = null;
+    if (!App.animating) return;
+    App.animating = false;
+    if (App.state) View.sync(App.myHand, App.state.counts, 0);
+    updateControls();
+  }, maxMs);
+}
+function endAnim() {
+  if (animGuard) { clearTimeout(animGuard); animGuard = null; }
+  App.animating = false;
 }
 
 function updateControls() {
@@ -84,6 +127,7 @@ function handleMsg(msg) {
       App.mySeat = msg.mySeat;
       App.state = null;
       App.myHand = [];
+      App.streak = 0; App.streakSeat = -1;
       App.mode = 'match';
       View.setSeats(msg.seats, App.mySeat);
       UI.clearLog();
@@ -115,7 +159,8 @@ function handleMsg(msg) {
       App.state = msg.state;
       UI.refreshScore(App.state);
       UI.refreshSeatStrip(App.state, App.mySeat);
-      View.setActive(App.state.turn);
+      // hold the ring sweep until the in-flight animation has landed
+      View.setActive(App.state.turn, App.animating ? 560 : 0);
       if (!App.animating && !App.dealing) View.sync(App.myHand, App.state.counts);
       updateControls();
       break;
@@ -148,7 +193,7 @@ function handleMsg(msg) {
       break;
 
     case 'over':
-      App.animating = false;
+      endAnim();
       UI.setTitle('Match complete'); UI.setMsg('');
       UI.log('Match over. Blue ' + msg.scores[0] + ' — Red ' + msg.scores[1] + '.', 'cl');
       setTimeout(() => UI.showOver(msg.scores, App.mySeat), 600);
@@ -160,25 +205,55 @@ function handleMsg(msg) {
 function handleEvent(msg) {
   const cls = { hit: 'ok', miss: 'no', claim: 'cl', sys: 'sys' }[msg.kind] || '';
   UI.log(msg.text, cls);
-  UI.setMsg(msg.text);
   const d = msg.data;
 
+  // "Alice asked Bob for Q♥ — HIT!" → hold the verdict back so the animation
+  // isn't spoiled by its own caption. The banner used to print the outcome
+  // before the card had even left the other player's hand.
+  const neutral = msg.text.split(' — ')[0];
+
   if (msg.kind === 'hit' && d) {
-    App.animating = true;
+    if (d.to === App.streakSeat) App.streak++;
+    else { App.streakSeat = d.to; App.streak = 1; }
+
+    UI.setMsg(neutral);
+    setTimeout(() => UI.setMsg(msg.text), 300);      // verdict lands on the apex hold
+    beginAnim(1400);                                // flight is 1080ms
     updateControls();
-    View.animateTransfer(d.from, d.to, d.card, () => {
-      App.animating = false;
-      if (App.state) View.sync(App.myHand, App.state.counts);
+    View.animateTransfer(d.from, d.to, d.card, App.streak, () => {
+      endAnim();
+      if (App.state) View.sync(App.myHand, App.state.counts, 260);
       updateControls();
     });
+
+  } else if (msg.kind === 'miss' && d) {
+    App.streak = 0; App.streakSeat = -1;
+    UI.setMsg(neutral);
+    setTimeout(() => UI.setMsg(msg.text), 190);      // verdict lands on the hard stop
+    UI.flashBanner();
+    beginAnim(1000);                                // miss is 560ms
+    updateControls();
+    // NB: the event is named from the CARD's point of view, so on a miss
+    // d.to is the asker and d.from is the player who refused.
+    View.animateMiss(d.to, d.from, d.card, () => {
+      endAnim();
+      if (App.state) View.sync(App.myHand, App.state.counts, 260);
+      updateControls();
+    });
+
   } else if (msg.kind === 'claim' && d) {
-    App.animating = true;
+    App.streak = 0; App.streakSeat = -1;
+    UI.setMsg(msg.text);
+    beginAnim(2400);                                // claim sweep is ~1900ms
     updateControls();
     View.animateClaim(d.hs, d.truth, () => {
-      App.animating = false;
+      endAnim();
       if (App.state) View.sync(App.myHand, App.state.counts);
       updateControls();
     });
+
+  } else {
+    UI.setMsg(msg.text);
   }
 }
 
@@ -407,7 +482,7 @@ function leaveQueue() {
    ========================================================================= */
 function teardownMatch() {
   if (App.gameHost) { App.gameHost.destroy(); App.gameHost = null; }
-  App.animating = false; App.dealing = false;
+  endAnim(); App.dealing = false;
   App.state = null; App.myHand = [];
   View.clearTable();
 }

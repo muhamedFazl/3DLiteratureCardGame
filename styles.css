@@ -188,6 +188,24 @@ input:focus, select:focus { border-color:#5b93cc; }
   animation:hintFade 1s ease 9s forwards; }
 @keyframes hintFade { to { opacity:0; visibility:hidden; } }
 
+/* A miss produces no card movement, so the banner carries the refusal.
+   Reduced motion swaps the shudder for a pure border tint. */
+#turnBanner.missHit { animation: missShudder .28s cubic-bezier(.36,.07,.19,.97) both; }
+@keyframes missShudder {
+  0%,100% { transform:translateX(-50%);                   border-color:#2b3d50; }
+  15%     { transform:translateX(-50%) translateX(-4px);  border-color:#a04747; }
+  40%     { transform:translateX(-50%) translateX(3px);   border-color:#a04747; }
+  70%     { transform:translateX(-50%) translateX(-2px);  border-color:#a04747; }
+}
+@keyframes missTint {
+  0%,100% { border-color:#2b3d50; }
+  40%     { border-color:#a04747; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #turnBanner.missHit { animation: missTint .34s ease both; }
+  #hint { animation:none; opacity:.55; }
+}
+
 #goTitle { font-size:30px; font-weight:800; margin:6px 0 10px; text-align:center; }
 #goSub { font-size:14px; opacity:.85; margin-bottom:6px; text-align:center; }
 

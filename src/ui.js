@@ -15,7 +15,7 @@ export const on = {
   joinLobby: () => {}, joinCode: () => {}, leaveQueue: () => {}, toggleShowAll: () => {},
   startMatch: () => {}, cancelHost: () => {}, requiredChange: () => {}, shuffleSeats: () => {},
   confirmAsk: () => {}, confirmDeclare: () => {}, restart: () => {}, quitToMenu: () => {},
-  openAsk: () => {}, openDeclare: () => {}
+  openAsk: () => {}, openDeclare: () => {}, toggleMotion: () => {}
 };
 
 /* ---------------- screens ---------------- */
@@ -111,6 +111,22 @@ export function renderHostPanel(info) {
 }
 
 /* ---------------- HUD ---------------- */
+/** Restart-safe one-shot shudder on the banner. On mobile the move log and
+    seat strip are hidden, so this is the ONLY miss feedback those players get. */
+export function flashBanner() {
+  const b = el('turnBanner');
+  b.classList.remove('missHit');
+  void b.offsetWidth;                 // force reflow so the animation restarts
+  b.classList.add('missHit');
+}
+
+export function setMotionToggle(reduced) {
+  const b = el('btnMotion');
+  if (!b) return;
+  b.textContent = reduced ? 'Motion: Reduced' : 'Motion: Full';
+  b.setAttribute('aria-pressed', reduced ? 'true' : 'false');
+}
+
 export function setTitle(html) { el('turnTitle').innerHTML = html; }
 export function setMsg(t) { el('turnMsg').textContent = t || ''; }
 
@@ -311,6 +327,7 @@ export function wire() {
   el('btnAsk').onclick = () => on.openAsk();
   el('btnDeclare').onclick = () => on.openDeclare();
   el('btnQuit').onclick = () => on.quitToMenu();
+  el('btnMotion').onclick = () => on.toggleMotion();
 
   el('askCancel').onclick = closeAsk;
   el('askConfirm').onclick = () => {

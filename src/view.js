@@ -32,6 +32,30 @@ const faceTexCache = {};
 let backTex = null;
 let selectedCard = null;
 
+/* ---------- scene refs needed by juice (hoisted out of local scope) ---------- */
+let feltMesh = null, rimMesh = null, bounceLight = null, ambientLight = null, keyLight = null;
+
+/* ---------- juice state ---------- */
+let reducedMotion = false;
+let MOTION = 1;                 // 1 or 0 — multiplies every displacement
+let trauma = 0, lastT = 0;
+
+const _savedP = new THREE.Vector3();
+const _savedQ = new THREE.Quaternion();
+const _roll   = new THREE.Quaternion();
+const _AXIS_Z = new THREE.Vector3(0, 0, 1);
+
+// travelling active-turn ring
+let ringFromV = 0, ringToV = 0, ringSweep = 1;   // sweep 1 = settled
+let bloomV = -1, bloomK = 0;                     // arrival bloom
+const ringFlash = [0, 0, 0, 0, 0, 0];            // per-view alert flash 0..1
+const RING_TEAM = [];                            // per-view team colour
+const _flashCol = new THREE.Color(0xff5a5a);
+const _ringCol  = new THREE.Color();
+
+// which side of a transfer the local player is on
+const ROLE_GAIN = 0, ROLE_LOSE = 1, ROLE_WATCH = 2;
+
 /* ---------- seat mapping ---------- */
 const toView = seat => (seat - mySeat + 6) % 6;
 const toSeat = view => (mySeat + view) % 6;
@@ -211,12 +235,43 @@ function handTransform(view, idx, count) {
   return { pos, rot };
 }
 
-function tweenTo(mesh, pos, rot, dur, delay, done) {
+/* Shortest-arc angle interpolation. The raw lerp this replaces could spin a
+   card the long way round: side seats sit at rot.y = -PI/2 - a, down near
+   -2.6 rad, so a naive lerp from +0.6 travels ~3.2 rad the wrong way. */
+function angLerp(a, b, k) {
+  let d = (b - a) % (Math.PI * 2);
+  if (d >  Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return a + d * k;
+}
+function lerpEuler(out, a, b, k) {
+  out.x = angLerp(a.x, b.x, k);
+  out.y = angLerp(a.y, b.y, k);
+  out.z = angLerp(a.z, b.z, k);
+}
+/* Anticipation curve: dips to -0.037 at t=1/3 before running to 1. The card
+   pulls back toward your hand before being torn away. */
+const backIn = t => t * t * (2.0 * t - 1.0);
+/* Signed shortest step around the 6-seat ring. */
+function shortDelta(a, b) { const d = (b - a + 6) % 6; return d > 3 ? d - 6 : d; }
+
+function roleFor(fromSeat, toSeat) {
+  if (toSeat === mySeat) return ROLE_GAIN;
+  if (fromSeat === mySeat) return ROLE_LOSE;
+  return ROLE_WATCH;
+}
+
+/* Quartic.Out gives front-loaded velocity and a long settle — the card leaps
+   out and comes to rest, instead of gliding symmetrically. Rotation lands at
+   86% of the position duration so the card is square in the fan while still
+   sliding the last few percent home; that desync is what reads as mass. */
+function tweenTo(mesh, pos, rot, dur, delay, done, ease) {
+  const e = ease || TWEEN.Easing.Quartic.Out;
   new TWEEN.Tween(mesh.position).to({ x: pos.x, y: pos.y, z: pos.z }, dur)
-    .delay(delay || 0).easing(TWEEN.Easing.Cubic.InOut)
+    .delay(delay || 0).easing(e)
     .onComplete(() => { if (done) done(); }).start();
-  new TWEEN.Tween(mesh.rotation).to({ x: rot.x, y: rot.y, z: rot.z }, dur)
-    .delay(delay || 0).easing(TWEEN.Easing.Cubic.InOut).start();
+  new TWEEN.Tween(mesh.rotation).to({ x: rot.x, y: rot.y, z: rot.z }, dur * 0.86)
+    .delay(delay || 0).easing(e).start();
 }
 
 let myOrder = [];   // ordered cardIds of my hand
@@ -226,8 +281,9 @@ export function layout(dur = 480) {
     const m = myMeshes[cid];
     if (!m) return;
     const t = handTransform(0, i, myOrder.length);
-    if (selectedCard === cid) { t.pos.y += 0.75; t.pos.z -= 0.35; }
-    tweenTo(m, t.pos, t.rot, dur, 0);
+    const isSel = selectedCard === cid;
+    if (isSel) { t.pos.y += 0.75 * MOTION; t.pos.z -= 0.35 * MOTION; }
+    tweenTo(m, t.pos, t.rot, dur, 0, null, isSel ? TWEEN.Easing.Back.Out : undefined);
   });
   for (let s = 0; s < 6; s++) {
     if (s === mySeat) continue;
@@ -271,8 +327,10 @@ export function initView(el, cbs) {
   raycaster = new THREE.Raycaster();
   pointer = new THREE.Vector2();
 
-  scene.add(new THREE.AmbientLight(0xbfd4ea, 0.55));
+  ambientLight = new THREE.AmbientLight(0xbfd4ea, 0.55);
+  scene.add(ambientLight);
   const key = new THREE.DirectionalLight(0xffffff, 0.95);
+  keyLight = key;
   key.position.set(6, 22, 10);
   key.castShadow = true;
   key.shadow.mapSize.set(2048, 2048);
@@ -283,8 +341,8 @@ export function initView(el, cbs) {
   scene.add(key);
   const rim = new THREE.DirectionalLight(0x6fa8e0, 0.35);
   rim.position.set(-10, 8, -12); scene.add(rim);
-  const bounce = new THREE.PointLight(0x2f6f4f, 0.5, 40);
-  bounce.position.set(0, 4, 0); scene.add(bounce);
+  bounceLight = new THREE.PointLight(0x2f6f4f, 0.5, 40);
+  bounceLight.position.set(0, 4, 0); scene.add(bounceLight);
 
   buildTable();
   buildAvatars();
@@ -307,11 +365,13 @@ function buildTable() {
   const felt = new THREE.Mesh(new THREE.CylinderGeometry(TABLE_R, TABLE_R, 0.5, 72),
     new THREE.MeshStandardMaterial({ color: 0x1d6b46, roughness: .95 }));
   felt.position.y = -0.25; felt.receiveShadow = true; scene.add(felt);
+  feltMesh = felt;
 
   const rim = new THREE.Mesh(new THREE.TorusGeometry(TABLE_R + 0.32, 0.55, 18, 80),
     new THREE.MeshStandardMaterial({ color: 0x5a3720, roughness: .55, metalness: .18 }));
   rim.rotation.x = Math.PI / 2; rim.position.y = -0.12;
   rim.castShadow = true; rim.receiveShadow = true; scene.add(rim);
+  rimMesh = rim;
 
   const base = new THREE.Mesh(new THREE.CylinderGeometry(2.6, 3.6, 1.3, 32),
     new THREE.MeshStandardMaterial({ color: 0x3f2717, roughness: .7 }));
@@ -375,6 +435,7 @@ export function setSeats(seats, me) {
     grp.add(lbl);
     labels[v] = lbl;
     rings[v].material.color.setHex(TEAM_HEX[info.team]);
+    RING_TEAM[v] = new THREE.Color(TEAM_HEX[info.team]);
   }
   // my own seat shows no face-down fan
   fans[mySeat].forEach(destroyCard);
@@ -382,14 +443,20 @@ export function setSeats(seats, me) {
 }
 
 export function clearTable() {
+  syncSig = '';
   Object.keys(myMeshes).forEach(k => { destroyCard(myMeshes[k]); delete myMeshes[k]; });
   for (let s = 0; s < 6; s++) { fans[s].forEach(destroyCard); fans[s] = []; }
   myOrder = [];
   selectedCard = null;
 }
 
+let syncSig = '';
+
 /** Reconcile all meshes with authoritative counts + my own hand. */
 export function sync(myHand, counts, dur = 420) {
+  const sig = myHand.join(',') + '|' + counts.join(',') + '|' + (selectedCard || '');
+  if (sig === syncSig) return;                 // nothing changed — don't restart tweens
+  syncSig = sig;
   myOrder = myHand.slice();
   for (const cid of Object.keys(myMeshes)) {
     if (!myOrder.includes(cid)) { destroyCard(myMeshes[cid]); delete myMeshes[cid]; }
@@ -406,17 +473,67 @@ export function sync(myHand, counts, dur = 420) {
   layout(dur);
 }
 
-export function setActive(seat) { activeSeat = seat; }
+/** Debug accessor — used by tests/ and the #debug console hook. */
+export function debugScene() { return scene; }
+
+export function setReducedMotion(b) {
+  reducedMotion = !!b;
+  MOTION = reducedMotion ? 0 : 1;
+  if (reducedMotion) trauma = 0;
+}
+export function isReducedMotion() { return reducedMotion; }
+
+/** Additive trauma. Decays quadratically, so it reads as an impact not a rumble. */
+export function shake(amount) {
+  if (reducedMotion) return;
+  trauma = Math.min(1, trauma + amount);
+}
+
+/** The active-turn highlight travels around the seat ring instead of teleporting. */
+export function setActive(seat, delay) {
+  if (seat === activeSeat) return;
+  const from = toView(activeSeat), to = toView(seat);
+  activeSeat = seat;
+  const go = () => {
+    ringFromV = from; ringToV = to;
+    if (reducedMotion) { ringSweep = 1; startBloom(to); return; }
+    const o = { s: 0 };
+    ringSweep = 0;
+    new TWEEN.Tween(o).to({ s: 1 }, 260).easing(TWEEN.Easing.Cubic.InOut)
+      .onUpdate(() => { ringSweep = o.s; })
+      .onComplete(() => { ringSweep = 1; startBloom(to); }).start();
+  };
+  if (delay) setTimeout(go, delay); else go();
+}
+
+function startBloom(v) {
+  bloomV = v; bloomK = 1;
+  const o = { b: 1 };
+  new TWEEN.Tween(o).to({ b: 0 }, 340).easing(TWEEN.Easing.Quadratic.Out)
+    .onUpdate(() => { bloomK = o.b; }).start();
+}
+
+/** Alert flash on one seat's ring — used for a refused ask and for the
+    spectator's "that seat held that card" reveal. */
+export function flashRing(seat, dur) {
+  const v = toView(seat);
+  const o = { f: 1 };
+  ringFlash[v] = 1;
+  new TWEEN.Tween(o).to({ f: 0 }, dur || 400).easing(TWEEN.Easing.Quadratic.Out)
+    .onUpdate(() => { ringFlash[v] = o.f; }).start();
+}
 
 export function setSelected(cid) {
   selectedCard = (selectedCard === cid) ? null : cid;
-  layout(240);
+  syncSig = '';
+  layout(200);
   return selectedCard;
 }
 export function getSelected() { return selectedCard; }
 
 export function animateDeal(myHand, counts, done) {
   clearTable();
+  syncSig = '';
   myOrder = myHand.slice();
 
   const stack = [];
@@ -453,59 +570,107 @@ export function animateDeal(myHand, counts, done) {
   setTimeout(() => { if (done) done(); }, order.length * 40 + 620);
 }
 
-/** Public reveal of a transferred card, from one fan into another. */
-export function animateTransfer(fromSeat, toSeat, cardId, done) {
-  let flyer = null;
-  let start = null;
+/* Transfer timing. The apex HOLD is the point of the whole animation: the
+   reveal used to happen at the instant the card was moving fastest through the
+   top of its arc, so nobody could read it. Now it stops, face-on and scaled up,
+   for long enough to actually be seen. Streak shortens the hold (pace), never
+   the roles (fairness) — role must not change total duration, or an observer
+   could infer who gained from timing alone. */
+const T_LAUNCH = 300, T_LAND = 460;
+const holdFor = streak => 320 - 120 * Math.min(streak, 8) / 8;   // 320 → 200
 
+/** Public reveal of a transferred card, from one fan into another. */
+export function animateTransfer(fromSeat, toSeat, cardId, streak, done) {
+  streak = streak || 0;
+  const k = Math.min(streak, 8) / 8;
+  const role = roleFor(fromSeat, toSeat);
+
+  /* ---- acquire the flyer ---- */
+  let flyer = null;
   if (fromSeat === mySeat && myMeshes[cardId]) {
     flyer = myMeshes[cardId];
     delete myMeshes[cardId];
     myOrder = myOrder.filter(c => c !== cardId);
   } else if (fans[fromSeat] && fans[fromSeat].length) {
     const back = fans[fromSeat].pop();
-    start = { pos: back.position.clone(), rot: back.rotation.clone() };
+    const bp = back.position.clone(), br = back.rotation.clone();
     destroyCard(back);
     flyer = buildCard(cardId);
-    flyer.position.copy(start.pos);
-    flyer.rotation.copy(start.rot);
+    flyer.position.copy(bp);
+    flyer.rotation.copy(br);
   } else {
     flyer = buildCard(cardId);
     const t = handTransform(toView(fromSeat), 0, 1);
     flyer.position.copy(t.pos); flyer.rotation.copy(t.rot);
   }
-
   layout(300);
 
-  const p0 = flyer.position.clone();
-  const endV = toView(toSeat);
-  const endT = handTransform(endV, 0, 1);
-  const mid = p0.clone().lerp(endT.pos, 0.5); mid.y += 4.2;
+  /* ---- per-role dressing. The same event means three different things:
+     you took a card, you got robbed, or you learned where a card lives. ---- */
+  let APEX = role === ROLE_GAIN ? 1.35 + 0.40 * k
+           : role === ROLE_LOSE ? 1.35 + 0.20 * k
+           : 1.30;
+  const SHK = role === ROLE_GAIN ? 0.28 + 0.30 * k
+            : role === ROLE_LOSE ? 0.22 + 0.22 * k
+            : 0.11;
+  if (reducedMotion) APEX = 1.15;
 
-  // face the camera at the apex so every player sees which card moved
+  const launchEase = (role === ROLE_LOSE && !reducedMotion)
+    ? backIn : TWEEN.Easing.Cubic.Out;
+
+  if (role !== ROLE_WATCH) {
+    const em = role === ROLE_GAIN ? TEAM_HEX[SEAT_TEAM[mySeat]] : 0x883344;
+    const amt = role === ROLE_GAIN ? 0.35 * k : 0.22 * k;
+    flyer.userData.picks.forEach(pk => {
+      pk.material.emissive = new THREE.Color(em);
+      pk.material.emissiveIntensity = amt;
+    });
+  }
+
+  /* ---- geometry ---- */
+  const p0 = flyer.position.clone();
+  const endT = handTransform(toView(toSeat), 0, 1);
+  const mid = p0.clone().lerp(endT.pos, 0.5);
+  mid.y += 4.2 * MOTION;
   const showRot = new THREE.Euler(-Math.PI / 2 + 0.62, 0, 0, 'YXZ');
-  const o = { t: 0 };
   const r0 = flyer.rotation.clone();
 
-  new TWEEN.Tween(o).to({ t: 1 }, 1050).easing(TWEEN.Easing.Quadratic.InOut)
+  const HOLD = holdFor(streak);
+  const TOTAL = T_LAUNCH + HOLD + T_LAND;
+  const B1 = T_LAUNCH, B2 = T_LAUNCH + HOLD;
+
+  let firedApex = false;
+  const o = { t: 0 };
+
+  new TWEEN.Tween(o).to({ t: TOTAL }, TOTAL).easing(TWEEN.Easing.Linear.None)
     .onUpdate(() => {
-      const u = o.t;
-      const a = p0.clone().lerp(mid, u), b = mid.clone().lerp(endT.pos, u);
-      flyer.position.copy(a.lerp(b, u));
-      // rotate to the reveal pose on the way up, to the destination pose on the way down
-      if (u < 0.5) {
-        const k = u / 0.5;
-        flyer.rotation.x = THREE.MathUtils.lerp(r0.x, showRot.x, k);
-        flyer.rotation.y = THREE.MathUtils.lerp(r0.y, showRot.y, k);
-        flyer.rotation.z = THREE.MathUtils.lerp(r0.z, showRot.z, k);
+      const ms = o.t;
+      if (ms < B1) {
+        const u = Math.min(1, Math.max(-0.1, launchEase(ms / B1)));
+        flyer.position.lerpVectors(p0, mid, u);
+        lerpEuler(flyer.rotation, r0, showRot, Math.min(1, Math.max(0, u)));
+        flyer.scale.setScalar(1 + (APEX - 1) * Math.min(1, Math.max(0, u)));
+      } else if (ms < B2) {
+        const u = (ms - B1) / HOLD;
+        if (!firedApex) {
+          firedApex = true;
+          // The spectator's news is the SEAT, not the card: "they held that."
+          if (role === ROLE_WATCH) flashRing(fromSeat, 260);
+        }
+        flyer.position.copy(mid);
+        flyer.rotation.copy(showRot);
+        flyer.rotation.y = showRot.y + 0.35 * u * MOTION;
+        flyer.scale.setScalar(APEX);
       } else {
-        const k = (u - 0.5) / 0.5;
-        flyer.rotation.x = THREE.MathUtils.lerp(showRot.x, endT.rot.x, k);
-        flyer.rotation.y = THREE.MathUtils.lerp(showRot.y, endT.rot.y, k);
-        flyer.rotation.z = THREE.MathUtils.lerp(showRot.z, endT.rot.z, k);
+        const u = TWEEN.Easing.Cubic.In((ms - B2) / T_LAND);   // accelerates: it falls home
+        flyer.position.lerpVectors(mid, endT.pos, u);
+        lerpEuler(flyer.rotation, showRot, endT.rot, u);
+        flyer.scale.setScalar(APEX - (APEX - 1) * u);
       }
     })
     .onComplete(() => {
+      flyer.scale.setScalar(1);
+      shake(SHK);
       if (toSeat === mySeat) {
         myMeshes[cardId] = flyer;
       } else {
@@ -514,6 +679,81 @@ export function animateTransfer(fromSeat, toSeat, cardId, done) {
       }
       if (done) done();
     }).start();
+}
+
+/** A refused ask. You reached for something and it wasn't there. */
+export function animateMiss(askerSeat, targetSeat, cardId, done) {
+  const ghost = buildCard(cardId);
+  ghost.traverse(o => {
+    if (o.material) { o.material.transparent = true; o.material.opacity = 0.62; }
+  });
+
+  const aV = toView(askerSeat), tV = toView(targetSeat);
+  const p0 = handTransform(aV, 0, 1).pos.clone(); p0.y += 0.6;
+  const pT = handTransform(tV, 0, 1).pos.clone();
+  const stop = p0.clone().lerp(pT, 0.62);            // 62% of the way. It never arrives.
+  stop.y += 2.0 * MOTION;
+  const dropTo = stop.y - 2.5 * MOTION;
+  const showRot = new THREE.Euler(-Math.PI / 2 + 0.62, 0, 0, 'YXZ');
+  const r0 = ghost.rotation.clone();
+  ghost.position.copy(p0);
+
+  const REACH = 190, HOLD = 40, DROP = 330;
+  const B1 = REACH, B2 = REACH + HOLD, TOTAL = B2 + DROP;
+  let firedStop = false;
+  const o = { t: 0 };
+
+  new TWEEN.Tween(o).to({ t: TOTAL }, TOTAL).easing(TWEEN.Easing.Linear.None)
+    .onUpdate(() => {
+      const ms = o.t;
+      if (ms < B1) {
+        const u = TWEEN.Easing.Cubic.Out(ms / B1);
+        ghost.position.lerpVectors(p0, stop, u);
+        lerpEuler(ghost.rotation, r0, showRot, u);
+        ghost.scale.setScalar(1 + 0.20 * u);
+      } else if (ms < B2) {
+        if (!firedStop) {
+          firedStop = true;
+          shake(0.22);
+          flashRing(targetSeat, 400);
+          refuseGesture(tV);
+        }
+        ghost.position.copy(stop);                   // hard stop — an eased stop reads as "arrived"
+      } else {
+        const u = (ms - B2) / DROP;
+        const g = TWEEN.Easing.Quadratic.In(u);      // gravity
+        ghost.position.y = stop.y + (dropTo - stop.y) * g;
+        ghost.rotation.z = showRot.z + 1.4 * g * MOTION;
+        const a = 0.62 * (1 - u);
+        ghost.traverse(c => { if (c.material) c.material.opacity = a; });
+      }
+    })
+    .onComplete(() => { destroyCard(ghost); if (done) done(); }).start();
+}
+
+/** The asked player shakes their head. Reduced motion gets a colour pulse. */
+function refuseGesture(v) {
+  const grp = avatars[v];
+  const torso = grp.userData.picks[1];
+  if (reducedMotion || v === 0) {
+    const base = torso.material.color.clone();
+    const hot = new THREE.Color(0xa04747);
+    const o = { k: 0 };
+    new TWEEN.Tween(o).to({ k: 1 }, 300).easing(TWEEN.Easing.Quadratic.InOut)
+      .onUpdate(() => {
+        const w = o.k < 0.5 ? o.k * 2 : (1 - o.k) * 2;
+        torso.material.color.lerpColors(base, hot, w);
+      })
+      .onComplete(() => torso.material.color.copy(base)).start();
+    return;
+  }
+  const base = grp.rotation.y;
+  const o = { a: 0 };
+  new TWEEN.Tween(o).to({ a: 1 }, 260).easing(TWEEN.Easing.Linear.None)
+    .onUpdate(() => {
+      grp.rotation.y = base + Math.sin(o.a * Math.PI * 6) * 0.14 * (1 - o.a);
+    })
+    .onComplete(() => { grp.rotation.y = base; }).start();
 }
 
 /** Reveal all six cards of a declared set and sweep them to the centre. */
@@ -607,19 +847,67 @@ function onResize() {
 function loop(t) {
   if (!running) return;
   requestAnimationFrame(loop);
+  const dt = lastT ? Math.min(t - lastT, 50) : 16;   // clamped so a backgrounded tab can't dump trauma
+  lastT = t;
   TWEEN.update(t);
-  controls.update();
+  controls.update();                                  // OrbitControls owns the camera
 
-  const pulse = 0.65 + Math.sin(t * 0.004) * 0.3;
+  const pulse = 0.65 + Math.sin(t * 0.004) * 0.30;
+
+  /* ---- rings: settled pulse, or a bright head travelling between seats ---- */
+  const headRaw = ringSweep >= 1
+    ? ringToV
+    : ringFromV + shortDelta(ringFromV, ringToV) * ringSweep;
+  const head = ((headRaw % 6) + 6) % 6;
+
   for (let v = 0; v < 6; v++) {
-    const s = toSeat(v);
-    rings[v].material.opacity = (s === activeSeat) ? pulse : 0;
+    let o;
+    if (ringSweep >= 1) {
+      o = (v === ringToV) ? pulse : 0;
+      if (v === bloomV) o = Math.min(1, o + bloomK * 0.9);
+    } else {
+      let d = Math.abs(v - head);
+      d = Math.min(d, 6 - d);
+      o = Math.max(0, 1 - d);
+    }
+    const f = ringFlash[v];
+    if (f > 0) {
+      o = Math.max(o, f);
+      _ringCol.copy(RING_TEAM[v] || _flashCol).lerp(_flashCol, f);
+      rings[v].material.color.copy(_ringCol);
+    } else if (RING_TEAM[v]) {
+      rings[v].material.color.copy(RING_TEAM[v]);
+    }
+    rings[v].material.opacity = o;
+    rings[v].scale.setScalar(1 + (v === bloomV ? 0.28 * bloomK : 0));
+
     const torso = avatars[v].userData.picks[1];
     const want = (v === hoverView) ? 1.06 : 1.0;
     torso.scale.setScalar(THREE.MathUtils.lerp(torso.scale.x, want, 0.18));
-    labels[v].material.opacity = 1;
+    labels[v].material.opacity = (toSeat(v) === activeSeat) ? 1.0 : 0.55;
   }
-  renderer.render(scene, camera);
+
+  /* ---- override → render → restore.
+     Never mutate controls or its inputs: with damping on, controls.update()
+     recomputes camera.position from its own spherical state every frame and
+     would clobber (or fight) anything written between updates. Offsetting
+     after update and restoring after render means a player can be mid-drag
+     through a shake and nothing desyncs. ---- */
+  if (trauma > 0 && !reducedMotion) {
+    _savedP.copy(camera.position);
+    _savedQ.copy(camera.quaternion);
+    const s = trauma * trauma;                        // quadratic: impact, not rumble
+    camera.position.x += (Math.random() * 2 - 1) * 0.55 * s;
+    camera.position.y += (Math.random() * 2 - 1) * 0.55 * s;
+    _roll.setFromAxisAngle(_AXIS_Z, (Math.random() * 2 - 1) * 0.020 * s);
+    camera.quaternion.multiply(_roll);                // local Z is the view axis
+    renderer.render(scene, camera);
+    camera.position.copy(_savedP);
+    camera.quaternion.copy(_savedQ);
+    trauma = Math.max(0, trauma - dt * 0.0019);       // 1.0 → 0 in ~526ms
+  } else {
+    renderer.render(scene, camera);
+  }
 }
 
 export function cardInfoText(cid, myHand) {
