@@ -1,0 +1,500 @@
+/* =========================================================================
+   main.js — application wiring and the app-level state machine.
+
+     MENU ──▶ HOSTING (lobby, waiting)  ──▶ MATCH
+          ──▶ BROWSING ──▶ QUEUED       ──▶ MATCH
+          ──▶ MATCH (bots, offline)
+   ========================================================================= */
+
+import {
+  SEAT_TEAM, TEAM_CSS, TEAM_NAME, HS_NAME, cardLabel,
+  hasLegalAskClient, shuffle
+} from './engine.js';
+import * as View from './view.js';
+import * as UI from './ui.js';
+import { Signal, HostNet, ClientNet, getNetKey } from './net.js';
+import { GameHost, makeIo, PACE } from './game.js';
+
+/* ---------------- app state ---------------- */
+const App = {
+  mode: 'menu',          // menu | hosting | browsing | queued | match
+  isHost: false,
+  online: false,
+  sig: null,
+  netKey: 'global',
+  hostNet: null,
+  clientNet: null,
+  gameHost: null,
+  seatOrder: [],         // host lobby: ordered list of {peerId|null, name}
+  seatOfPeer: new Map(), // peerId -> seat (during a match)
+  peerOfSeat: new Map(),
+  required: 2,
+  // client-side view of the match
+  mySeat: 0,
+  myHand: [],
+  state: null,
+  animating: false,
+  dealing: false,
+  joiningId: null,
+  showAll: false
+};
+
+/* ---------------- boot ---------------- */
+View.initView(document.getElementById('app'), {
+  onCardClick: cid => {
+    const sel = View.setSelected(cid);
+    if (sel) UI.setMsg(View.cardInfoText(sel, App.myHand));
+  },
+  onSeatClick: seat => {
+    if (!canAct()) return;
+    if (SEAT_TEAM[seat] === SEAT_TEAM[App.mySeat]) {
+      UI.setMsg(nameOf(seat) + ' is your teammate — you may not ask them for cards.');
+      return;
+    }
+    if (!App.state.counts[seat]) {
+      UI.setMsg(nameOf(seat) + ' has no cards left and cannot be asked.');
+      return;
+    }
+    UI.openAsk({ state: App.state, hand: App.myHand, mySeat: App.mySeat }, seat);
+  }
+});
+UI.wire();
+UI.showScreen('menu');
+
+const nameOf = seat => (App.state && App.state.seats[seat]) ? App.state.seats[seat].name : 'Seat ' + seat;
+
+function canAct() {
+  return App.mode === 'match' && App.state && !App.state.over &&
+    App.state.turn === App.mySeat && !App.animating && !App.dealing;
+}
+
+function updateControls() {
+  const act = canAct();
+  UI.setTurnControls(act, act ? hasLegalAskClient(App.state, App.myHand, App.mySeat) : false);
+}
+
+/* =========================================================================
+   Client-side message handling — identical for offline bots, host, and peer
+   ========================================================================= */
+function handleMsg(msg) {
+  if (!msg) return;
+  switch (msg.k) {
+
+    case 'welcome':
+      App.mySeat = msg.mySeat;
+      App.state = null;
+      App.myHand = [];
+      App.mode = 'match';
+      View.setSeats(msg.seats, App.mySeat);
+      UI.clearLog();
+      UI.overlay('joinOverlay', false);
+      UI.overlay('hostOverlay', false);
+      UI.overlay('gameOver', false);
+      UI.showScreen('hud');
+      UI.toast('');
+      document.getElementById('goRestart').style.display =
+        (App.online && !App.isHost) ? 'none' : '';
+      break;
+
+    case 'hand':
+      App.myHand = msg.hand;
+      if (!App.animating && !App.dealing && App.state) View.sync(App.myHand, App.state.counts);
+      break;
+
+    case 'deal':
+      App.dealing = true;
+      UI.setTitle('Dealing…'); UI.setMsg('');
+      View.animateDeal(App.myHand, msg.counts, () => {
+        App.dealing = false;
+        if (App.state) View.sync(App.myHand, App.state.counts);
+        updateControls();
+      });
+      break;
+
+    case 'state':
+      App.state = msg.state;
+      UI.refreshScore(App.state);
+      UI.refreshSeatStrip(App.state, App.mySeat);
+      View.setActive(App.state.turn);
+      if (!App.animating && !App.dealing) View.sync(App.myHand, App.state.counts);
+      updateControls();
+      break;
+
+    case 'turn': {
+      const s = App.state ? App.state.seats[msg.seat] : null;
+      const nm = s ? s.name : 'Player';
+      const team = s ? s.team : 0;
+      UI.setTitle('<span style="color:' + TEAM_CSS[team] + '">' +
+        (msg.seat === App.mySeat ? 'Your turn' : nm + "'s turn") + '</span>' +
+        ' <span class="sub">(' + TEAM_NAME[team] + ')</span>');
+      if (msg.seat === App.mySeat) {
+        UI.setMsg(hasLegalAskClient(App.state, App.myHand, App.mySeat)
+          ? 'Click an opponent, or use the Ask button.'
+          : 'No legal ask left — you must declare a half-suit.');
+      } else {
+        UI.setMsg('Waiting…');
+      }
+      updateControls();
+      break;
+    }
+
+    case 'ev':
+      handleEvent(msg);
+      break;
+
+    case 'reject':
+      UI.setMsg(msg.reason || 'Move rejected.');
+      updateControls();
+      break;
+
+    case 'over':
+      App.animating = false;
+      UI.setTitle('Match complete'); UI.setMsg('');
+      UI.log('Match over. Blue ' + msg.scores[0] + ' — Red ' + msg.scores[1] + '.', 'cl');
+      setTimeout(() => UI.showOver(msg.scores, App.mySeat), 600);
+      updateControls();
+      break;
+  }
+}
+
+function handleEvent(msg) {
+  const cls = { hit: 'ok', miss: 'no', claim: 'cl', sys: 'sys' }[msg.kind] || '';
+  UI.log(msg.text, cls);
+  UI.setMsg(msg.text);
+  const d = msg.data;
+
+  if (msg.kind === 'hit' && d) {
+    App.animating = true;
+    updateControls();
+    View.animateTransfer(d.from, d.to, d.card, () => {
+      App.animating = false;
+      if (App.state) View.sync(App.myHand, App.state.counts);
+      updateControls();
+    });
+  } else if (msg.kind === 'claim' && d) {
+    App.animating = true;
+    updateControls();
+    View.animateClaim(d.hs, d.truth, () => {
+      App.animating = false;
+      if (App.state) View.sync(App.myHand, App.state.counts);
+      updateControls();
+    });
+  }
+}
+
+/* ---------------- outgoing actions ---------------- */
+function sendAction(msg) {
+  if (App.online && !App.isHost) App.clientNet.send(msg);
+  else if (App.gameHost) App.gameHost.onAction(App.mySeat, msg);
+}
+
+/* =========================================================================
+   Offline / bots
+   ========================================================================= */
+function startBotsMatch() {
+  teardownMatch();
+  App.online = false;
+  App.isHost = true;
+  const seats = [{ name: UI.playerName(), isBot: false }];
+  const botNames = ['Bot B1', 'Bot A1', 'Bot B2', 'Bot A2', 'Bot B3'];
+  botNames.forEach(n => seats.push({ name: n, isBot: true }));
+
+  const io = makeIo(0, handleMsg, () => {});
+  App.gameHost = new GameHost(seats, io);
+  App.gameHost.start();
+}
+
+/* =========================================================================
+   Hosting
+   ========================================================================= */
+async function ensureSignal() {
+  if (App.sig && App.sig.client && App.sig.client.connected) return App.sig;
+  UI.toast('Connecting to the lobby broker…');
+  const sig = new Signal();
+  await sig.connect(s => UI.toast(s));
+  App.sig = sig;
+  App.netKey = await getNetKey();
+  UI.toast('');
+  return sig;
+}
+
+async function startHosting() {
+  try {
+    UI.overlay('hostOverlay', true);
+    UI.el('hostCode').textContent = '····';
+    UI.el('hostPlayers').innerHTML = '<div class="dim">Connecting…</div>';
+    await ensureSignal();
+  } catch (e) {
+    UI.overlay('hostOverlay', false);
+    UI.toast(e.message || 'Could not reach a broker.', 'bad');
+    return;
+  }
+
+  App.mode = 'hosting';
+  App.isHost = true;
+  App.online = true;
+  App.required = 2;
+
+  const hostName = UI.playerName();
+  App.hostNet = new HostNet(App.sig, App.netKey, {
+    name: hostName + "'s table", hostName, required: App.required
+  });
+  App.seatOrder = [{ peerId: null, name: hostName, isHost: true }];
+
+  App.hostNet.onJoin = (peerId, name) => {
+    if (App.seatOrder.some(p => p.peerId === peerId)) return;
+    App.seatOrder.push({ peerId, name, isHost: false });
+    UI.log(name + ' joined the queue.', 'sys');
+    renderHost();
+  };
+  App.hostNet.onLeave = peerId => {
+    const i = App.seatOrder.findIndex(p => p.peerId === peerId);
+    if (i >= 0) App.seatOrder.splice(i, 1);
+    if (App.mode === 'match' && App.seatOfPeer.has(peerId)) {
+      const seat = App.seatOfPeer.get(peerId);
+      App.seatOfPeer.delete(peerId);
+      App.peerOfSeat.delete(seat);
+      if (App.gameHost) App.gameHost.convertToBot(seat);
+    }
+    renderHost();
+  };
+  App.hostNet.onMessage = (peerId, data) => {
+    if (App.mode !== 'match' || !App.gameHost) return;
+    const seat = App.seatOfPeer.get(peerId);
+    if (seat === undefined) return;
+    App.gameHost.onAction(seat, data);
+  };
+
+  App.hostNet.start();
+  renderHost();
+}
+
+function renderHost() {
+  if (!App.hostNet) return;
+  App.hostNet.setRequired(App.required);
+  UI.renderHostPanel({
+    code: App.hostNet.code,
+    netKey: App.netKey,
+    players: App.seatOrder,
+    required: App.required
+  });
+}
+
+function cancelHosting() {
+  if (App.hostNet) { App.hostNet.close(); App.hostNet = null; }
+  App.seatOrder = [];
+  App.mode = 'menu';
+  App.online = false;
+  UI.overlay('hostOverlay', false);
+  UI.toast('Table closed.', 'warn');
+}
+
+function startHostedMatch() {
+  if (!App.hostNet) return;
+  const humans = App.seatOrder.slice(0, 6);
+  if (humans.length < App.required) return;
+
+  App.hostNet.markStarted();
+  App.seatOfPeer.clear(); App.peerOfSeat.clear();
+
+  const seats = [];
+  const botPool = ['Bot Alpha', 'Bot Bravo', 'Bot Cass', 'Bot Delta', 'Bot Echo'];
+  let bi = 0;
+  for (let s = 0; s < 6; s++) {
+    const h = humans[s];
+    if (h) {
+      seats.push({ name: h.name, isBot: false });
+      if (h.peerId) { App.seatOfPeer.set(h.peerId, s); App.peerOfSeat.set(s, h.peerId); }
+    } else {
+      seats.push({ name: botPool[bi++ % botPool.length], isBot: true });
+    }
+  }
+
+  const io = makeIo(0, handleMsg, (seat, msg) => {
+    if (seat === null) {
+      for (const [pid] of App.seatOfPeer) App.hostNet.sendTo(pid, msg);
+    } else {
+      const pid = App.peerOfSeat.get(seat);
+      if (pid) App.hostNet.sendTo(pid, msg);
+    }
+  });
+
+  if (App.gameHost) App.gameHost.destroy();
+  App.gameHost = new GameHost(seats, io);
+  App.mode = 'match';
+  UI.overlay('hostOverlay', false);
+  App.gameHost.start();
+}
+
+/* =========================================================================
+   Joining
+   ========================================================================= */
+async function startBrowsing() {
+  UI.overlay('joinOverlay', true);
+  UI.showQueueView(false);
+  UI.renderLobbies([]);
+  try {
+    await ensureSignal();
+  } catch (e) {
+    UI.toast(e.message || 'Could not reach a broker.', 'bad');
+    UI.el('lobbyList').innerHTML =
+      '<div class="empty">Could not reach a signalling broker.<br>You can still play offline with bots.</div>';
+    return;
+  }
+  App.mode = 'browsing';
+  App.online = true;
+  App.isHost = false;
+
+  if (!App.clientNet) {
+    App.clientNet = new ClientNet(App.sig, App.netKey);
+    App.clientNet.onLobbies = list => {
+      if (App.mode === 'browsing') UI.renderLobbies(list, App.joiningId);
+      if (App.mode === 'queued' && App.clientNet.lobby) {
+        const mine = list.find(l => l.id === App.clientNet.lobby.id);
+        if (mine) UI.updateQueueView(mine);
+      }
+    };
+    App.clientNet.onMessage = handleMsg;
+    App.clientNet.onJoined = () => {
+      App.mode = 'queued';
+      App.joiningId = null;
+      UI.toast('Connected to the table — waiting for the host.', 'good');
+      UI.showQueueView(true, {
+        name: App.clientNet.lobby.name,
+        queued: App.clientNet.lobby.queued,
+        required: App.clientNet.lobby.required,
+        players: App.clientNet.lobby.players || []
+      });
+    };
+    App.clientNet.onRejected = reason => {
+      App.joiningId = null;
+      App.mode = 'browsing';
+      UI.showQueueView(false);
+      UI.toast(reason, 'bad');
+    };
+    App.clientNet.onClosed = reason => {
+      App.joiningId = null;
+      if (App.mode === 'match') {
+        UI.setMsg(reason + ' — returning to the menu.');
+        setTimeout(() => quitToMenu(), 2200);
+      } else {
+        App.mode = 'browsing';
+        UI.showQueueView(false);
+      }
+      UI.toast(reason, 'bad');
+    };
+  }
+  App.clientNet.discover(App.showAll);
+}
+
+function joinLobby(lobby) {
+  if (!App.clientNet) return;
+  App.joiningId = lobby.id;
+  UI.renderLobbies([...App.clientNet.lobbies.values()], App.joiningId);
+  UI.toast('Connecting to ' + lobby.name + '…');
+  App.clientNet.join(lobby, UI.playerName());
+}
+
+function leaveQueue() {
+  if (App.clientNet) App.clientNet.leave();
+  App.joiningId = null;
+  if (App.mode === 'queued') App.mode = 'browsing';
+  UI.showQueueView(false);
+}
+
+/* =========================================================================
+   Teardown
+   ========================================================================= */
+function teardownMatch() {
+  if (App.gameHost) { App.gameHost.destroy(); App.gameHost = null; }
+  App.animating = false; App.dealing = false;
+  App.state = null; App.myHand = [];
+  View.clearTable();
+}
+
+function quitToMenu() {
+  teardownMatch();
+  if (App.hostNet) { App.hostNet.close(); App.hostNet = null; }
+  if (App.clientNet) { App.clientNet.leave(); App.clientNet.stopDiscovery(); }
+  App.seatOrder = []; App.seatOfPeer.clear(); App.peerOfSeat.clear();
+  App.mode = 'menu'; App.online = false; App.isHost = false;
+  UI.overlay('joinOverlay', false);
+  UI.overlay('hostOverlay', false);
+  UI.overlay('gameOver', false);
+  UI.overlay('askModal', false);
+  UI.overlay('declModal', false);
+  UI.showScreen('menu');
+  UI.toast('');
+}
+
+/* =========================================================================
+   Callbacks
+   ========================================================================= */
+UI.on.play = () => startBrowsing();
+UI.on.host = () => startHosting();
+UI.on.bots = () => { UI.overlay('joinOverlay', false); leaveQueue(); startBotsMatch(); };
+
+UI.on.joinLobby = joinLobby;
+UI.on.joinCode = code => {
+  if (!code || !App.clientNet) return;
+  const l = App.clientNet.findByCode(code);
+  if (l) joinLobby(l);
+  else UI.toast('No table with code ' + code + ' on this network. Try “Show all networks”.', 'bad');
+};
+UI.on.leaveQueue = leaveQueue;
+UI.on.toggleShowAll = v => {
+  App.showAll = v;
+  if (App.clientNet && App.mode === 'browsing') App.clientNet.discover(v);
+};
+
+UI.on.startMatch = startHostedMatch;
+UI.on.cancelHost = cancelHosting;
+UI.on.requiredChange = delta => {
+  App.required = Math.max(2, Math.min(6, App.required + delta));
+  renderHost();
+};
+UI.on.shuffleSeats = () => {
+  const host = App.seatOrder[0];
+  const rest = shuffle(App.seatOrder.slice(1));
+  App.seatOrder = [host, ...rest];
+  renderHost();
+};
+
+UI.on.openAsk = () => {
+  if (!canAct()) return;
+  UI.openAsk({ state: App.state, hand: App.myHand, mySeat: App.mySeat });
+};
+UI.on.openDeclare = () => {
+  if (!canAct()) return;
+  UI.openDeclare({ state: App.state, hand: App.myHand, mySeat: App.mySeat });
+};
+UI.on.confirmAsk = (target, card) => sendAction({ k: 'ask', target, card });
+UI.on.confirmDeclare = (hs, assignment) => sendAction({ k: 'declare', hs, assignment });
+
+UI.on.restart = () => {
+  if (!App.online) { startBotsMatch(); return; }
+  if (App.isHost && App.gameHost) {
+    const seats = App.gameHost.engine.players.map(p => ({ name: p.name, isBot: p.isBot }));
+    App.gameHost.destroy();
+    teardownMatch();
+    const io = makeIo(0, handleMsg, (seat, msg) => {
+      if (seat === null) { for (const [pid] of App.seatOfPeer) App.hostNet.sendTo(pid, msg); }
+      else { const pid = App.peerOfSeat.get(seat); if (pid) App.hostNet.sendTo(pid, msg); }
+    });
+    App.gameHost = new GameHost(seats, io);
+    App.mode = 'match';
+    App.gameHost.start();
+  }
+};
+UI.on.quitToMenu = quitToMenu;
+
+/* Opt-in debug handle (#debug in the URL). Exposes only what this client
+   already knows — its own hand and the public state — never other hands. */
+if (location.hash === '#debug') {
+  window.__LIT = { App, UI, View, sendAction, canAct };
+}
+
+window.addEventListener('beforeunload', () => {
+  if (App.hostNet) App.hostNet.close();
+  if (App.clientNet) App.clientNet.leave();
+});

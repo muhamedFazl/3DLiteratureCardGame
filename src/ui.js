@@ -1,0 +1,341 @@
+/* =========================================================================
+   ui.js — every DOM concern: menu, lobby overlays, HUD, modals.
+   Pure presentation; main.js supplies the callbacks in `on`.
+   ========================================================================= */
+
+import {
+  HS_LIST, HS_CARDS, HS_NAME, CARD_HS, SUIT_SYM, cardLabel, isRed,
+  TEAM_NAME, TEAM_CSS, SEAT_TEAM, canAskClient
+} from './engine.js';
+
+export const el = id => document.getElementById(id);
+
+export const on = {
+  play: () => {}, host: () => {}, bots: () => {},
+  joinLobby: () => {}, joinCode: () => {}, leaveQueue: () => {}, toggleShowAll: () => {},
+  startMatch: () => {}, cancelHost: () => {}, requiredChange: () => {}, shuffleSeats: () => {},
+  confirmAsk: () => {}, confirmDeclare: () => {}, restart: () => {}, quitToMenu: () => {},
+  openAsk: () => {}, openDeclare: () => {}
+};
+
+/* ---------------- screens ---------------- */
+export function showScreen(name) {
+  for (const id of ['menu', 'hud']) el(id).classList.toggle('hidden', id !== name);
+}
+export function overlay(id, show) { el(id).classList.toggle('show', !!show); }
+
+export function toast(text, kind) {
+  const t = el('netStatus');
+  t.textContent = text || '';
+  t.className = 'netStatus' + (kind ? ' ' + kind : '') + (text ? ' show' : '');
+}
+
+export function playerName() {
+  const v = (el('nameInput').value || '').trim();
+  return v ? v.slice(0, 14) : 'Player';
+}
+
+/* ---------------- lobby browser ---------------- */
+export function renderLobbies(list, busyId) {
+  const box = el('lobbyList');
+  box.innerHTML = '';
+  if (!list.length) {
+    box.innerHTML = '<div class="empty">No tables on your network yet.<br>' +
+      'Ask your friend to press <b>Host a Table</b>, or try “Show all networks”.</div>';
+    return;
+  }
+  for (const l of list) {
+    const row = document.createElement('div');
+    row.className = 'lobbyRow';
+    const full = l.queued >= 6;
+    row.innerHTML =
+      '<div class="lobbyMain"><div class="lobbyName">' + esc(l.name) + '</div>' +
+      '<div class="lobbySub">Host: ' + esc(l.host) + ' &nbsp;·&nbsp; code <b>' + esc(l.code) + '</b>' +
+      ' &nbsp;·&nbsp; ' + l.queued + '/' + l.required + ' queued</div></div>';
+    const b = document.createElement('button');
+    b.className = 'primary small';
+    b.textContent = full ? 'Full' : (busyId === l.id ? 'Joining…' : 'Join');
+    b.disabled = full || !!busyId;
+    b.onclick = () => on.joinLobby(l);
+    row.appendChild(b);
+    box.appendChild(row);
+  }
+}
+
+export function showQueueView(show, info) {
+  el('lobbyBrowse').classList.toggle('hidden', !!show);
+  el('queueView').classList.toggle('hidden', !show);
+  if (show && info) updateQueueView(info);
+}
+
+export function updateQueueView(info) {
+  el('queueTitle').textContent = info.name || 'Table';
+  el('queueInfo').innerHTML =
+    '<b>' + info.queued + '</b> of <b>' + info.required + '</b> players queued' +
+    '<div class="queueNames">' + (info.players || []).map(esc).join(' · ') + '</div>' +
+    '<div class="queueWait">Waiting for the host to start the match…</div>';
+}
+
+/* ---------------- host overlay ---------------- */
+export function renderHostPanel(info) {
+  el('hostCode').textContent = info.code;
+  el('hostNetLabel').textContent = info.netKey === 'global'
+    ? 'visible to everyone (network not detected)'
+    : 'visible on your network';
+
+  const box = el('hostPlayers');
+  box.innerHTML = '';
+  info.players.forEach((p, i) => {
+    const d = document.createElement('div');
+    d.className = 'hostPlayer';
+    const team = SEAT_TEAM[i];
+    d.innerHTML = '<span class="dot" style="background:' + TEAM_CSS[team] + '"></span>' +
+      '<span class="hpName">' + esc(p.name) + (p.isHost ? ' <i>(you, host)</i>' : '') + '</span>' +
+      '<span class="hpTeam" style="color:' + TEAM_CSS[team] + '">' + TEAM_NAME[team] + '</span>';
+    box.appendChild(d);
+  });
+  const botSeats = 6 - info.players.length;
+  if (botSeats > 0) {
+    const d = document.createElement('div');
+    d.className = 'hostPlayer bot';
+    d.innerHTML = '<span class="dot" style="background:#4a5a6a"></span>' +
+      '<span class="hpName">' + botSeats + ' seat' + (botSeats > 1 ? 's' : '') + ' will be filled by bots</span>';
+    box.appendChild(d);
+  }
+
+  el('queuedCount').textContent = info.players.length;
+  el('reqCount').textContent = info.required;
+  el('btnStart').disabled = info.players.length < info.required;
+  el('btnStart').textContent = info.players.length < info.required
+    ? 'Waiting for players…' : 'Start Match';
+}
+
+/* ---------------- HUD ---------------- */
+export function setTitle(html) { el('turnTitle').innerHTML = html; }
+export function setMsg(t) { el('turnMsg').textContent = t || ''; }
+
+export function log(text, cls) {
+  const d = document.createElement('div');
+  d.className = cls || '';
+  d.textContent = text;
+  const list = el('logList');
+  list.appendChild(d);
+  while (list.childNodes.length > 300) list.removeChild(list.firstChild);
+  list.scrollTop = list.scrollHeight;
+}
+export function clearLog() { el('logList').innerHTML = ''; }
+
+export function refreshScore(state) {
+  el('scoreA').textContent = state.scores[0];
+  el('scoreB').textContent = state.scores[1];
+  for (const [t, node] of [[0, el('setsA')], [1, el('setsB')]]) {
+    node.innerHTML = '';
+    for (const hs of state.claimedSets[t]) {
+      const s = document.createElement('span');
+      s.className = 'setIcon';
+      s.style.color = isRed(HS_CARDS[hs][0]) ? '#ff8a8a' : '#e6edf5';
+      s.textContent = (hs.endsWith('minor') ? 'm' : 'M') + SUIT_SYM[hs[0]];
+      s.title = HS_NAME[hs];
+      node.appendChild(s);
+    }
+  }
+}
+
+export function refreshSeatStrip(state, mySeat) {
+  const box = el('seatStrip');
+  box.innerHTML = '';
+  for (const s of state.seats) {
+    const d = document.createElement('div');
+    d.className = 'seatChip' + (s.seat === state.turn ? ' active' : '') + (s.seat === mySeat ? ' me' : '');
+    d.style.borderColor = TEAM_CSS[s.team];
+    d.innerHTML = '<span style="color:' + TEAM_CSS[s.team] + '">' + esc(s.name) + '</span>' +
+      '<b>' + state.counts[s.seat] + '</b>';
+    box.appendChild(d);
+  }
+}
+
+export function setTurnControls(canAct, canAsk) {
+  el('btnAsk').disabled = !canAct || !canAsk;
+  el('btnDeclare').disabled = !canAct;
+}
+
+/* ---------------- ask modal ---------------- */
+let askSel = { opp: null, hs: null, card: null };
+let askCtx = null;
+
+export function openAsk(ctx, preOpp) {
+  askCtx = ctx;
+  askSel = { opp: (preOpp !== undefined && preOpp !== null) ? preOpp : null, hs: null, card: null };
+  renderAsk();
+  overlay('askModal', true);
+}
+export function closeAsk() { overlay('askModal', false); }
+
+function renderAsk() {
+  const { state, hand, mySeat } = askCtx;
+  const myTeam = SEAT_TEAM[mySeat];
+
+  const oppBox = el('askOpps'); oppBox.innerHTML = '';
+  for (const s of state.seats) {
+    if (s.team === myTeam) continue;
+    const c = document.createElement('div');
+    const n = state.counts[s.seat];
+    c.className = 'chip' + (askSel.opp === s.seat ? ' sel' : '');
+    c.textContent = s.name + ' (' + n + ')';
+    if (!n) { c.style.opacity = .35; c.style.cursor = 'not-allowed'; }
+    else c.onclick = () => { askSel.opp = s.seat; askSel.card = null; renderAsk(); };
+    oppBox.appendChild(c);
+  }
+
+  const setBox = el('askSets'); setBox.innerHTML = '';
+  const mySets = [...new Set(hand.map(c => CARD_HS[c]))]
+    .filter(h => state.claimed[h] === undefined).sort();
+  if (!mySets.length) setBox.innerHTML = '<span class="dim">No eligible half-suits.</span>';
+  for (const hs of mySets) {
+    const c = document.createElement('div');
+    c.className = 'chip ' + (isRed(HS_CARDS[hs][0]) ? 'rd' : 'bk') + (askSel.hs === hs ? ' sel' : '');
+    c.textContent = HS_NAME[hs] + ' · ' + hand.filter(x => CARD_HS[x] === hs).length;
+    c.onclick = () => { askSel.hs = hs; askSel.card = null; renderAsk(); };
+    setBox.appendChild(c);
+  }
+
+  const cardBox = el('askCards'); cardBox.innerHTML = '';
+  if (!askSel.hs) {
+    cardBox.innerHTML = '<span class="dim">Pick a half-suit first.</span>';
+  } else {
+    const avail = HS_CARDS[askSel.hs].filter(c => !hand.includes(c));
+    if (!avail.length) cardBox.innerHTML = '<span class="dim">You hold this whole set — declare it!</span>';
+    for (const cid of avail) {
+      const c = document.createElement('div');
+      c.className = 'chip ' + (isRed(cid) ? 'rd' : 'bk') + (askSel.card === cid ? ' sel' : '');
+      c.textContent = cardLabel(cid);
+      c.onclick = () => { askSel.card = cid; renderAsk(); };
+      cardBox.appendChild(c);
+    }
+  }
+
+  const ok = askSel.opp !== null && askSel.card &&
+    canAskClient(state, hand, mySeat, askSel.opp, askSel.card);
+  el('askConfirm').disabled = !ok;
+}
+
+/* ---------------- declare modal ---------------- */
+let declCtx = null;
+
+export function openDeclare(ctx) {
+  declCtx = ctx;
+  const { state, hand, mySeat } = ctx;
+  const myTeam = SEAT_TEAM[mySeat];
+  const sel = el('declSet');
+  sel.innerHTML = '';
+  const live = HS_LIST.filter(h => state.claimed[h] === undefined);
+  live.sort((a, b) =>
+    hand.filter(c => CARD_HS[c] === b).length - hand.filter(c => CARD_HS[c] === a).length);
+  for (const hs of live) {
+    const o = document.createElement('option');
+    o.value = hs;
+    o.textContent = HS_NAME[hs] + '  (you hold ' + hand.filter(c => CARD_HS[c] === hs).length + ')';
+    sel.appendChild(o);
+  }
+  sel.onchange = renderDeclRows;
+  renderDeclRows();
+  overlay('declModal', true);
+}
+export function closeDeclare() { overlay('declModal', false); }
+
+function renderDeclRows() {
+  const { state, hand, mySeat } = declCtx;
+  const myTeam = SEAT_TEAM[mySeat];
+  const hs = el('declSet').value;
+  const box = el('declRows'); box.innerHTML = '';
+  if (!hs) return;
+  const mates = state.seats.filter(s => s.team === myTeam);
+  for (const cid of HS_CARDS[hs]) {
+    const row = document.createElement('div'); row.className = 'declRow';
+    const lbl = document.createElement('div');
+    lbl.className = 'declCard';
+    lbl.style.color = isRed(cid) ? '#ff8080' : '#e6edf5';
+    lbl.textContent = cardLabel(cid);
+    const sel = document.createElement('select');
+    sel.dataset.card = cid;
+    for (const m of mates) {
+      const o = document.createElement('option');
+      o.value = m.seat;
+      o.textContent = m.name + (m.seat === mySeat ? ' (you)' : '');
+      sel.appendChild(o);
+    }
+    if (hand.includes(cid)) sel.value = String(mySeat);
+    row.appendChild(lbl); row.appendChild(sel);
+    box.appendChild(row);
+  }
+}
+
+/* ---------------- game over ---------------- */
+export function showOver(scores, mySeat) {
+  const myTeam = SEAT_TEAM[mySeat];
+  const [a, b] = scores;
+  const t = el('goTitle'), s = el('goSub');
+  if (a === b) { t.textContent = 'DRAW'; t.style.color = '#ffd479'; }
+  else {
+    const win = a > b ? 0 : 1;
+    t.textContent = TEAM_NAME[win].toUpperCase() + ' WINS';
+    t.style.color = TEAM_CSS[win];
+    s.textContent = (win === myTeam ? 'Your team took it. ' : 'Better luck next round. ');
+  }
+  s.textContent = (s.textContent || '') + 'Final score — Blue ' + a + ' : ' + b + ' Red';
+  overlay('gameOver', true);
+}
+
+/* ---------------- wiring ---------------- */
+export function wire() {
+  el('btnPlay').onclick = () => on.play();
+  el('btnHost').onclick = () => on.host();
+  el('btnRules').onclick = () => overlay('rulesModal', true);
+  el('rulesClose').onclick = () => overlay('rulesModal', false);
+
+  el('btnBots').onclick = () => on.bots();
+  el('btnJoinBack').onclick = () => { overlay('joinOverlay', false); on.leaveQueue(); };
+  el('btnLeaveQueue').onclick = () => on.leaveQueue();
+  el('chkShowAll').onchange = e => on.toggleShowAll(e.target.checked);
+  el('btnJoinCode').onclick = () => on.joinCode((el('codeInput').value || '').trim().toUpperCase());
+  el('codeInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') on.joinCode((el('codeInput').value || '').trim().toUpperCase());
+  });
+
+  el('btnStart').onclick = () => on.startMatch();
+  el('btnCancelHost').onclick = () => on.cancelHost();
+  el('btnShuffleSeats').onclick = () => on.shuffleSeats();
+  el('reqMinus').onclick = () => on.requiredChange(-1);
+  el('reqPlus').onclick = () => on.requiredChange(1);
+
+  el('btnAsk').onclick = () => on.openAsk();
+  el('btnDeclare').onclick = () => on.openDeclare();
+  el('btnQuit').onclick = () => on.quitToMenu();
+
+  el('askCancel').onclick = closeAsk;
+  el('askConfirm').onclick = () => {
+    if (askSel.opp === null || !askSel.card) return;
+    closeAsk();
+    on.confirmAsk(askSel.opp, askSel.card);
+  };
+
+  el('declCancel').onclick = closeDeclare;
+  el('declConfirm').onclick = () => {
+    const hs = el('declSet').value;
+    if (!hs) return;
+    const assignment = {};
+    el('declRows').querySelectorAll('select').forEach(s => {
+      assignment[s.dataset.card] = parseInt(s.value, 10);
+    });
+    closeDeclare();
+    on.confirmDeclare(hs, assignment);
+  };
+
+  el('goRestart').onclick = () => { overlay('gameOver', false); on.restart(); };
+  el('goMenu').onclick = () => { overlay('gameOver', false); on.quitToMenu(); };
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Literature — 3D Card Game</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="app"></div>
+
+<!-- ============================ MAIN MENU ============================ -->
+<div id="menu">
+  <div class="menuCard">
+    <h1>LITERATURE</h1>
+    <p class="tag">Canadian Fish · six players · two teams · eight half-suits</p>
+
+    <label class="nameLabel">Your name</label>
+    <input id="nameInput" maxlength="14" placeholder="Player" autocomplete="off">
+
+    <div class="menuBtns">
+      <button id="btnPlay" class="primary big">Play</button>
+      <button id="btnHost" class="big">Host a Table</button>
+      <button id="btnRules" class="ghost">How to Play</button>
+    </div>
+    <p class="foot">Tables are found over WebRTC. Friends on the same Wi-Fi see each
+      other automatically; anyone else can join with a 4-letter code.</p>
+  </div>
+</div>
+
+<!-- ============================ JOIN / BROWSE ======================== -->
+<div class="modalWrap" id="joinOverlay">
+  <div class="modal wide">
+    <div id="lobbyBrowse">
+      <h2>Tables forming near you</h2>
+      <div class="rowBetween">
+        <label class="checkLine"><input type="checkbox" id="chkShowAll"> Show all networks</label>
+        <div class="codeJoin">
+          <input id="codeInput" maxlength="4" placeholder="CODE" autocomplete="off">
+          <button id="btnJoinCode" class="small">Join by code</button>
+        </div>
+      </div>
+      <div id="lobbyList" class="lobbyList"></div>
+      <div class="orLine"><span>or</span></div>
+      <button id="btnBots" class="primary wideBtn">Play with Bots (offline)</button>
+      <div class="modalFoot">
+        <button id="btnJoinBack">Back to Menu</button>
+      </div>
+    </div>
+
+    <div id="queueView" class="hidden">
+      <h2 id="queueTitle">Table</h2>
+      <div class="queueBox" id="queueInfo"></div>
+      <div class="modalFoot">
+        <button id="btnLeaveQueue" class="danger">Leave Queue</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ HOST PANEL =========================== -->
+<div class="modalWrap" id="hostOverlay">
+  <div class="modal">
+    <h2>Your Table</h2>
+    <div class="codeBanner">
+      <div class="codeBig" id="hostCode">····</div>
+      <div class="codeSub">room code — <span id="hostNetLabel">visible on your network</span></div>
+    </div>
+
+    <label>Players required to start</label>
+    <div class="reqRow">
+      <button id="reqMinus" class="small">−</button>
+      <div class="reqBox"><b id="queuedCount">1</b> queued / <b id="reqCount">2</b> required</div>
+      <button id="reqPlus" class="small">+</button>
+    </div>
+
+    <label>Seats &amp; teams</label>
+    <div id="hostPlayers" class="hostPlayers"></div>
+
+    <div class="modalFoot spread">
+      <button id="btnShuffleSeats" class="ghost">Shuffle Seats</button>
+      <div class="rowGap">
+        <button id="btnCancelHost" class="danger">Cancel</button>
+        <button id="btnStart" class="primary" disabled>Waiting for players…</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ GAME HUD ============================= -->
+<div id="hud" class="hidden">
+  <div id="scoreboard">
+    <div class="teamRow"><span class="teamName blue">TEAM BLUE</span><span class="teamPts blue" id="scoreA">0</span></div>
+    <div class="setIcons" id="setsA"></div>
+    <hr>
+    <div class="teamRow"><span class="teamName red">TEAM RED</span><span class="teamPts red" id="scoreB">0</span></div>
+    <div class="setIcons" id="setsB"></div>
+  </div>
+
+  <div id="turnBanner">
+    <div id="turnTitle">…</div>
+    <div id="turnMsg"></div>
+  </div>
+
+  <div id="logPanel">
+    <h3>Move History</h3>
+    <div id="logList"></div>
+  </div>
+
+  <div id="seatStrip"></div>
+
+  <div id="hint">Right-drag to orbit &nbsp;•&nbsp; Scroll to zoom &nbsp;•&nbsp; Click a card to inspect, an opponent to ask</div>
+
+  <div id="actionBar">
+    <button id="btnAsk" class="primary" disabled>Ask for a Card</button>
+    <button id="btnDeclare" disabled>Declare a Half-Suit</button>
+    <button id="btnQuit" class="ghost">Quit</button>
+  </div>
+</div>
+
+<div id="netStatus" class="netStatus"></div>
+
+<!-- ============================ ASK MODAL ============================ -->
+<div class="modalWrap" id="askModal">
+  <div class="modal">
+    <h2>Ask an Opponent</h2>
+    <label>1 — Choose an opponent</label>
+    <div class="chipRow" id="askOpps"></div>
+    <label>2 — Choose a half-suit you hold</label>
+    <div class="chipRow" id="askSets"></div>
+    <label>3 — Choose the card to ask for</label>
+    <div class="chipRow" id="askCards"></div>
+    <div class="warn">You may only ask for a card in a half-suit you already hold, and never for a card already in your hand.</div>
+    <div class="modalFoot">
+      <button id="askCancel">Cancel</button>
+      <button id="askConfirm" class="primary" disabled>Confirm Ask</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ DECLARE MODAL ======================== -->
+<div class="modalWrap" id="declModal">
+  <div class="modal">
+    <h2>Declare a Half-Suit</h2>
+    <label>Half-suit to claim</label>
+    <select id="declSet"></select>
+    <label>Assign every card to a member of your team</label>
+    <div id="declRows"></div>
+    <div class="warn">All six assignments must be exactly right. One mistake hands the set to the other team.</div>
+    <div class="modalFoot">
+      <button id="declCancel">Cancel</button>
+      <button id="declConfirm" class="danger">Submit Claim</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ RULES ================================ -->
+<div class="modalWrap" id="rulesModal">
+  <div class="modal">
+    <h2>How to Play</h2>
+    <div class="rules">
+      <p><b>The deck.</b> 48 cards — a standard deck with the four 8s removed — split into
+      8 half-suits of 6: the minor (2–7) and major (9–A) half of each suit.</p>
+      <p><b>Teams.</b> Six players alternate around the table, so your two teammates sit
+      two seats away in each direction.</p>
+      <p><b>Asking.</b> On your turn, ask one opponent for one specific card. You must
+      already hold at least one card of that half-suit, and you must not hold the card
+      you ask for. If they have it, it moves to you and you go again. If not, the turn
+      passes to them.</p>
+      <p><b>Declaring.</b> At any point on your turn you may claim a half-suit by naming
+      which of your teammates holds each of its six cards. All six right — your team
+      scores. One wrong — the other team scores. Either way those cards leave play.</p>
+      <p><b>Winning.</b> First team past four half-suits takes the match.</p>
+      <p><b>Controls.</b> Left-click a card to inspect it or an opponent to ask them.
+      Right-drag orbits the table, scroll zooms.</p>
+    </div>
+    <div class="modalFoot">
+      <button id="rulesClose" class="primary">Got it</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ GAME OVER ============================ -->
+<div class="modalWrap" id="gameOver">
+  <div class="modal">
+    <h2 class="dim">Match Complete</h2>
+    <div id="goTitle">—</div>
+    <div id="goSub"></div>
+    <div class="modalFoot center">
+      <button id="goMenu">Back to Menu</button>
+      <button id="goRestart" class="primary">Play Again</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+<script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"></script>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>

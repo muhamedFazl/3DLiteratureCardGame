@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Literature — rules soak test</title>
+<style>
+  body { background:#0a0f14; color:#e8eef5; font:14px/1.6 "Segoe UI",system-ui,sans-serif;
+         margin:0; padding:32px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { opacity:.55; font-size:13px; margin-bottom:20px; }
+  button { font:inherit; font-weight:600; color:#eaf2fa; cursor:pointer; padding:9px 18px;
+           background:linear-gradient(#2f6fb5,#1d4a7d); border:1px solid #4b8fd6; border-radius:8px; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input { font:inherit; color:#e8eef5; background:#182837; border:1px solid #35516b;
+          border-radius:6px; padding:8px; width:90px; }
+  pre { margin-top:20px; padding:16px; background:#0c161f; border:1px solid #24374a;
+        border-radius:8px; white-space:pre-wrap; font:12.5px/1.7 ui-monospace,Consolas,monospace; }
+  .pass { color:#7fe3a0; font-weight:700; }
+  .fail { color:#ff9a9a; font-weight:700; }
+</style>
+</head>
+<body>
+<h1>Rules soak test</h1>
+<div class="sub">Runs full bot-vs-bot matches through <code>engine.js</code> and asserts the
+invariants that matter. No rendering, no network.</div>
+
+<label>Games: <input id="n" type="number" value="300" min="1" max="5000"></label>
+<button id="run">Run</button>
+<pre id="out">Ready.</pre>
+
+<script type="module">
+import {
+  Engine, Knowledge, HS_LIST, HS_CARDS, CARD_HS, SEAT_TEAM,
+  botChooseAsk, botFindCertainClaim, botForcedClaim, noteAsk
+} from '../src/engine.js';
+
+const out = document.getElementById('out');
+
+function playOne(errs) {
+  const seats = [0, 1, 2, 3, 4, 5].map(i => ({ name: 'P' + i, isBot: true }));
+  const g = new Engine(seats);
+  const kn = new Knowledge();
+  g.deal();
+
+  // every card dealt exactly once
+  const seen = new Set();
+  for (const p of g.players) for (const c of p.hand) {
+    if (seen.has(c)) errs.push('DUPLICATE CARD ' + c);
+    seen.add(c);
+  }
+  if (seen.size !== 48) errs.push('DEAL SIZE ' + seen.size);
+
+  let steps = 0;
+  while (g.declaredCount() < 8 && steps < 5000) {
+    steps++;
+    if (!g.players[g.turn].hand.length) {
+      const t = g.findTurnHolder(g.turn);
+      if (t < 0) break;
+      g.turn = t;
+      if (!g.players[g.turn].hand.length) break;
+    }
+    kn.infer(g);
+    const seat = g.turn;
+
+    const cl = botFindCertainClaim(g, kn, seat);
+    if (cl) {
+      // a bot that claims certainty must never be wrong
+      if (!g.validateClaim(seat, cl.hs, cl.assignment)) errs.push('CERTAIN CLAIM WAS WRONG');
+      g.applyClaim(seat, cl.hs, cl.assignment);
+      kn.dropSet(cl.hs);
+      continue;
+    }
+    const a = botChooseAsk(g, kn, seat);
+    if (a) {
+      if (!g.canAsk(seat, a.target, a.card)) errs.push('ILLEGAL ASK');
+      if (SEAT_TEAM[seat] === SEAT_TEAM[a.target]) errs.push('ASKED OWN TEAMMATE');
+      const r = g.applyAsk(seat, a.target, a.card);
+      noteAsk(kn, seat, a.target, a.card, r.hit);
+      continue;
+    }
+    const f = botForcedClaim(g, kn, seat);
+    if (f) { g.applyClaim(seat, f.hs, f.assignment); kn.dropSet(f.hs); continue; }
+    break;
+  }
+
+  // conservation: cards in hands + cards in claimed sets == 48
+  const inHands = g.counts().reduce((x, y) => x + y, 0);
+  if (inHands + g.declaredCount() * 6 !== 48) errs.push('CARD LEAK');
+  if (g.scores[0] + g.scores[1] !== g.declaredCount()) errs.push('SCORE MISMATCH');
+  // no claimed card may linger in a hand
+  for (const hs of HS_LIST) {
+    if (g.hsLive(hs)) continue;
+    for (const p of g.players) if (p.hand.some(c => CARD_HS[c] === hs)) errs.push('CLAIMED CARD STILL HELD');
+  }
+  return { sets: g.declaredCount(), steps };
+}
+
+document.getElementById('run').onclick = () => {
+  const btn = document.getElementById('run');
+  btn.disabled = true;
+  out.textContent = 'Running…';
+
+  setTimeout(() => {
+    const N = Math.max(1, Math.min(5000, +document.getElementById('n').value || 300));
+    const errs = [], res = [];
+    const t0 = performance.now();
+    for (let i = 0; i < N; i++) {
+      try { res.push(playOne(errs)); }
+      catch (e) { errs.push('EXCEPTION: ' + e.message); }
+    }
+    const ms = Math.round(performance.now() - t0);
+    const allEight = res.filter(r => r.sets === 8).length;
+    const steps = res.map(r => r.steps);
+    const avg = Math.round(steps.reduce((a, b) => a + b, 0) / steps.length);
+
+    const ok = errs.length === 0 && allEight === res.length;
+    out.innerHTML =
+      (ok ? '<span class="pass">PASS</span>' : '<span class="fail">FAIL</span>') + '\n\n' +
+      'games run           ' + res.length + '\n' +
+      'reached all 8 sets  ' + allEight + ' / ' + res.length + '\n' +
+      'actions per match   avg ' + avg + ', max ' + Math.max(...steps) + '\n' +
+      'wall clock          ' + ms + ' ms\n' +
+      'invariant failures  ' + errs.length + '\n' +
+      (errs.length ? '\n' + [...new Set(errs)].slice(0, 10).join('\n') : '');
+    btn.disabled = false;
+  }, 30);
+};
+</script>
+</body>
+</html>

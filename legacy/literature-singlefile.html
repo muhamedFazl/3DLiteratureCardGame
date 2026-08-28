@@ -1,0 +1,1372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Literature — 3D Card Game</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden;
+    background:#0a0f14; font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color:#e8eef5; }
+  #app { position:fixed; inset:0; }
+  canvas { display:block; }
+
+  /* ---------- HUD ---------- */
+  #turnBanner {
+    position:absolute; top:12px; left:50%; transform:translateX(-50%);
+    min-width:420px; max-width:70vw; text-align:center; padding:10px 22px;
+    background:rgba(8,14,20,.82); border:1px solid #2b3d50; border-radius:10px;
+    box-shadow:0 6px 24px rgba(0,0,0,.5); pointer-events:none; z-index:20;
+  }
+  #turnTitle { font-size:16px; font-weight:700; letter-spacing:.5px; }
+  #turnMsg { font-size:13px; opacity:.82; margin-top:3px; min-height:16px; }
+
+  #scoreboard {
+    position:absolute; top:12px; left:12px; width:230px; z-index:20;
+    background:rgba(8,14,20,.82); border:1px solid #2b3d50; border-radius:10px; padding:10px 12px;
+  }
+  .teamRow { display:flex; align-items:center; justify-content:space-between; margin:4px 0; }
+  .teamName { font-weight:700; font-size:13px; }
+  .teamPts { font-size:20px; font-weight:800; }
+  .blue { color:#5aa9ff; } .red { color:#ff6b6b; }
+  .setIcons { display:flex; flex-wrap:wrap; gap:3px; margin-top:2px; min-height:20px; }
+  .setIcon { font-size:11px; padding:1px 5px; border-radius:4px; background:#1a2836; border:1px solid #31465c; }
+  #scoreboard hr { border:none; border-top:1px solid #263647; margin:8px 0; }
+
+  #logPanel {
+    position:absolute; top:12px; right:12px; width:262px; height:44vh; z-index:20;
+    background:rgba(8,14,20,.82); border:1px solid #2b3d50; border-radius:10px;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  #logPanel h3 { margin:0; padding:8px 10px; font-size:12px; letter-spacing:1px;
+    text-transform:uppercase; background:#12202c; border-bottom:1px solid #26384a; }
+  #logList { flex:1; overflow-y:auto; padding:6px 10px; font-size:11.5px; line-height:1.45; }
+  #logList div { padding:3px 0; border-bottom:1px dashed #1d2b39; }
+  #logList .ok { color:#7fe3a0; } #logList .no { color:#ff9a9a; }
+  #logList .cl { color:#ffd479; } #logList .sys { color:#8fa8bf; font-style:italic; }
+
+  #actionBar {
+    position:absolute; bottom:14px; left:50%; transform:translateX(-50%);
+    display:flex; gap:10px; z-index:20; align-items:center;
+  }
+  button {
+    font-family:inherit; font-size:13px; font-weight:600; color:#eaf2fa; cursor:pointer;
+    background:linear-gradient(#22364a,#16242f); border:1px solid #3a5470; border-radius:8px;
+    padding:9px 18px; transition:.15s;
+  }
+  button:hover:not(:disabled) { background:linear-gradient(#2d4763,#1c2f3e); border-color:#5b82ab; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button.primary { background:linear-gradient(#2f6fb5,#1d4a7d); border-color:#4b8fd6; }
+  button.primary:hover:not(:disabled) { background:linear-gradient(#3a83d1,#255a95); }
+  button.danger { background:linear-gradient(#8f3030,#5f1f1f); border-color:#c05a5a; }
+
+  #hint { position:absolute; bottom:56px; left:50%; transform:translateX(-50%);
+    font-size:12px; opacity:.7; z-index:20; pointer-events:none; text-align:center; }
+
+  /* ---------- Modals ---------- */
+  .modalWrap { position:absolute; inset:0; z-index:40; display:none;
+    align-items:center; justify-content:center; background:rgba(2,6,10,.62); }
+  .modalWrap.show { display:flex; }
+  .modal { width:520px; max-width:92vw; max-height:86vh; overflow-y:auto;
+    background:#101c26; border:1px solid #34506a; border-radius:12px;
+    box-shadow:0 20px 60px rgba(0,0,0,.7); padding:18px 20px; }
+  .modal h2 { margin:0 0 12px; font-size:17px; letter-spacing:.4px; }
+  .modal label { display:block; font-size:11.5px; text-transform:uppercase;
+    letter-spacing:1px; opacity:.65; margin:12px 0 5px; }
+  select { width:100%; padding:8px; font-family:inherit; font-size:13px; color:#e8eef5;
+    background:#182837; border:1px solid #35516b; border-radius:6px; }
+  .chipRow { display:flex; flex-wrap:wrap; gap:7px; }
+  .chip { padding:7px 12px; border-radius:7px; border:1px solid #35516b; background:#182837;
+    cursor:pointer; font-size:13px; font-weight:600; user-select:none; }
+  .chip:hover { border-color:#5b93cc; }
+  .chip.sel { background:#2f6fb5; border-color:#7fb6f0; }
+  .chip.rd { color:#ff8080; } .chip.bk { color:#dfe8f2; }
+  .chip.sel.rd, .chip.sel.bk { color:#fff; }
+  .modalFoot { display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
+  .declRow { display:grid; grid-template-columns:74px 1fr; gap:8px; align-items:center; margin:6px 0; }
+  .declCard { font-size:16px; font-weight:800; text-align:center; padding:6px;
+    background:#1b2a38; border:1px solid #35516b; border-radius:6px; }
+  .warn { font-size:11.5px; color:#ffcf7a; margin-top:10px; line-height:1.4; }
+
+  #gameOver .modal { text-align:center; }
+  #goTitle { font-size:30px; font-weight:800; margin:6px 0 10px; }
+  #goSub { font-size:14px; opacity:.85; margin-bottom:6px; }
+
+  @media (max-width: 900px) {
+    #logPanel { display:none; } #scoreboard { width:180px; } #turnBanner { min-width:260px; }
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="scoreboard">
+  <div class="teamRow"><span class="teamName blue">TEAM BLUE</span><span class="teamPts blue" id="scoreA">0</span></div>
+  <div class="setIcons" id="setsA"></div>
+  <hr>
+  <div class="teamRow"><span class="teamName red">TEAM RED</span><span class="teamPts red" id="scoreB">0</span></div>
+  <div class="setIcons" id="setsB"></div>
+</div>
+
+<div id="turnBanner">
+  <div id="turnTitle">Initializing…</div>
+  <div id="turnMsg"></div>
+</div>
+
+<div id="logPanel">
+  <h3>Move History</h3>
+  <div id="logList"></div>
+</div>
+
+<div id="hint">Right-drag to orbit &nbsp;•&nbsp; Scroll to zoom &nbsp;•&nbsp; Click your cards to inspect</div>
+
+<div id="actionBar">
+  <button id="btnAsk" class="primary" disabled>Ask for a Card</button>
+  <button id="btnDeclare" disabled>Declare a Half-Suit</button>
+</div>
+
+<!-- ASK MODAL -->
+<div class="modalWrap" id="askModal">
+  <div class="modal">
+    <h2>Ask an Opponent</h2>
+    <label>1 — Choose an opponent (Team Red)</label>
+    <div class="chipRow" id="askOpps"></div>
+    <label>2 — Choose a half-suit you hold</label>
+    <div class="chipRow" id="askSets"></div>
+    <label>3 — Choose the card to ask for</label>
+    <div class="chipRow" id="askCards"></div>
+    <div class="warn">You may only ask for a card in a half-suit you already hold, and never for a card already in your hand.</div>
+    <div class="modalFoot">
+      <button id="askCancel">Cancel</button>
+      <button id="askConfirm" class="primary" disabled>Confirm Ask</button>
+    </div>
+  </div>
+</div>
+
+<!-- DECLARE MODAL -->
+<div class="modalWrap" id="declModal">
+  <div class="modal">
+    <h2>Declare a Half-Suit</h2>
+    <label>Half-suit to claim</label>
+    <select id="declSet"></select>
+    <label>Assign every card to a member of Team Blue</label>
+    <div id="declRows"></div>
+    <div class="warn">All six assignments must be exactly right. One mistake gives the set to Team Red.</div>
+    <div class="modalFoot">
+      <button id="declCancel">Cancel</button>
+      <button id="declConfirm" class="danger">Submit Claim</button>
+    </div>
+  </div>
+</div>
+
+<!-- GAME OVER -->
+<div class="modalWrap" id="gameOver">
+  <div class="modal">
+    <h2 style="opacity:.6">Match Complete</h2>
+    <div id="goTitle">—</div>
+    <div id="goSub"></div>
+    <div class="modalFoot" style="justify-content:center">
+      <button id="goRestart" class="primary">Play Again</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+<script>
+/* =========================================================================
+   LITERATURE  —  3D team card game (6 players, 2 teams, 8 half-suits)
+   ========================================================================= */
+
+/* ------------------------- 1. RULES / CONSTANTS ------------------------- */
+
+const SUITS   = ['C', 'D', 'H', 'S'];
+const SUIT_SYM = { C: '♣', D: '♦', H: '♥', S: '♠' };
+const SUIT_NAME = { C: 'Clubs', D: 'Diamonds', H: 'Hearts', S: 'Spades' };
+const RED_SUITS = { D: true, H: true };
+const MINOR = ['2', '3', '4', '5', '6', '7'];
+const MAJOR = ['9', '10', 'J', 'Q', 'K', 'A'];
+
+const HS_LIST = [];          // ['C-minor', 'C-major', ...]  8 entries
+const HS_CARDS = {};         // hsId -> [cardId x6]
+const HS_NAME = {};          // hsId -> 'Minor Clubs'
+const CARD_HS = {};          // cardId -> hsId
+const ALL_CARDS = [];        // 48 card ids
+
+for (const s of SUITS) {
+  for (const half of ['minor', 'major']) {
+    const hs = s + '-' + half;
+    HS_LIST.push(hs);
+    HS_NAME[hs] = (half === 'minor' ? 'Minor ' : 'Major ') + SUIT_NAME[s];
+    HS_CARDS[hs] = (half === 'minor' ? MINOR : MAJOR).map(r => r + s);
+    HS_CARDS[hs].forEach(c => { CARD_HS[c] = hs; ALL_CARDS.push(c); });
+  }
+}
+const cardRank = id => id.slice(0, -1);
+const cardSuit = id => id.slice(-1);
+const cardLabel = id => cardRank(id) + SUIT_SYM[cardSuit(id)];
+const isRed = id => !!RED_SUITS[cardSuit(id)];
+
+const SEAT_NAMES = ['You', 'Bot B1', 'Bot A1', 'Bot B2', 'Bot A2', 'Bot B3'];
+const SEAT_TEAM  = [0, 1, 0, 1, 0, 1];               // 0 = Blue (A), 1 = Red (B)
+const TEAM_NAME  = ['Team Blue', 'Team Red'];
+const TEAM_HEX   = [0x3f7fd0, 0xc04242];
+const TEAM_CSS   = ['#5aa9ff', '#ff6b6b'];
+
+const STATE = {
+  INITIALIZING: 'INITIALIZING', DEALING: 'DEALING', TURN_IDLE: 'TURN_IDLE',
+  RESOLVING_ASK: 'RESOLVING_ASK', RESOLVING_CLAIM: 'RESOLVING_CLAIM',
+  CHECK_WIN: 'CHECK_WIN', GAME_OVER: 'GAME_OVER'
+};
+
+/* ------------------------- 2. GAME STATE -------------------------------- */
+
+const G = {
+  state: STATE.INITIALIZING,
+  players: [],          // {seat, name, team, hand:[cardId], isHuman}
+  turn: 0,
+  scores: [0, 0],
+  claimedSets: [[], []],// per team, list of hsId
+  claimed: {},          // hsId -> team that won it (undefined if live)
+  busy: false
+};
+
+function makePlayers() {
+  G.players = SEAT_NAMES.map((n, i) => ({
+    seat: i, name: n, team: SEAT_TEAM[i], hand: [], isHuman: i === 0
+  }));
+}
+const teamMates = t => G.players.filter(p => p.team === t);
+const opponentsOf = t => G.players.filter(p => p.team !== t);
+const ownerOf = cid => { for (const p of G.players) if (p.hand.includes(cid)) return p.seat; return -1; };
+const hsLive = hs => G.claimed[hs] === undefined;
+
+function shuffle(a) {
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/* --- validators --- */
+function canAskForCard(askerSeat, targetSeat, cid) {
+  const A = G.players[askerSeat], T = G.players[targetSeat];
+  if (!A || !T) return false;
+  if (A.team === T.team) return false;
+  if (T.hand.length === 0) return false;
+  if (A.hand.length === 0) return false;
+  const hs = CARD_HS[cid];
+  if (!hs || !hsLive(hs)) return false;
+  if (A.hand.includes(cid)) return false;
+  if (!A.hand.some(c => CARD_HS[c] === hs)) return false;
+  return true;
+}
+
+// assignment: { cardId: seat }
+function validateClaim(callerSeat, hs, assignment) {
+  const team = G.players[callerSeat].team;
+  for (const cid of HS_CARDS[hs]) {
+    const declared = assignment[cid];
+    if (declared === undefined || declared === null) return false;
+    if (SEAT_TEAM[declared] !== team) return false;
+    if (ownerOf(cid) !== declared) return false;
+  }
+  return true;
+}
+
+/* ------------------------- 3. PUBLIC KNOWLEDGE (AI memory) -------------- */
+/* Only information every player could legitimately observe is stored here.
+   Each bot combines this with its own hand.                                */
+
+const PK = {
+  has: [],    // per seat: Set(cardId) known to be held
+  not: [],    // per seat: Set(cardId) known NOT to be held
+  hsHas: []   // per seat: Set(hsId) known to hold at least one card of
+};
+function resetPK() {
+  PK.has = []; PK.not = []; PK.hsHas = [];
+  for (let i = 0; i < 6; i++) { PK.has[i] = new Set(); PK.not[i] = new Set(); PK.hsHas[i] = new Set(); }
+}
+function pkSetHas(seat, cid) {
+  PK.has[seat].add(cid); PK.not[seat].delete(cid);
+  PK.hsHas[seat].add(CARD_HS[cid]);
+  for (let s = 0; s < 6; s++) if (s !== seat) { PK.has[s].delete(cid); PK.not[s].add(cid); }
+}
+function pkSetNot(seat, cid) { PK.not[seat].add(cid); PK.has[seat].delete(cid); }
+function pkForgetCard(cid) {
+  for (let s = 0; s < 6; s++) { PK.has[s].delete(cid); PK.not[s].delete(cid); }
+}
+function pkKnownOwner(cid) { for (let s = 0; s < 6; s++) if (PK.has[s].has(cid)) return s; return -1; }
+
+/** Deductive closure over public information. */
+function runInference() {
+  let changed = true, guard = 0;
+  while (changed && guard++ < 12) {
+    changed = false;
+    // (a) empty hands hold nothing
+    for (const p of G.players) if (p.hand.length === 0) {
+      for (const cid of ALL_CARDS) if (hsLive(CARD_HS[cid]) && !PK.not[p.seat].has(cid)) {
+        PK.not[p.seat].add(cid); PK.has[p.seat].delete(cid); changed = true;
+      }
+    }
+    // (b) claimed sets vanish
+    for (const hs of HS_LIST) if (!hsLive(hs)) HS_CARDS[hs].forEach(pkForgetCard);
+    // (c) a live card excluded from 5 seats must be at the 6th
+    for (const cid of ALL_CARDS) {
+      if (!hsLive(CARD_HS[cid])) continue;
+      if (pkKnownOwner(cid) >= 0) continue;
+      const cand = G.players.filter(p => p.hand.length > 0 && !PK.not[p.seat].has(cid));
+      if (cand.length === 1) { pkSetHas(cand[0].seat, cid); changed = true; }
+    }
+    // (d) if known cards == hand size, everything else is excluded
+    for (const p of G.players) {
+      const live = [...PK.has[p.seat]].filter(c => hsLive(CARD_HS[c]));
+      if (live.length && live.length === p.hand.length) {
+        for (const cid of ALL_CARDS) {
+          if (!hsLive(CARD_HS[cid]) || PK.has[p.seat].has(cid) || PK.not[p.seat].has(cid)) continue;
+          PK.not[p.seat].add(cid); changed = true;
+        }
+      }
+    }
+  }
+}
+
+/* ------------------------- 4. THREE.JS SCENE ---------------------------- */
+
+let renderer, scene, camera, controls, raycaster, pointer;
+const CARD_W = 1.15, CARD_H = 1.6, CARD_D = 0.035;
+const SEAT_R = 7.4, AVATAR_R = 9.9, TABLE_R = 9.0;
+
+const cardMeshes = {};     // cardId -> THREE.Group
+const seatMeshes = [];     // avatar groups
+const seatRings  = [];     // highlight rings
+const faceTexCache = {};
+let backTex = null;
+let selectedHandCard = null;
+let hoverSeat = -1;
+
+function seatAngle(i) { return Math.PI / 2 - i * Math.PI / 3; }
+function seatPos(i, r) {
+  const a = seatAngle(i);
+  return new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r);
+}
+
+/* --- procedural textures --- */
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function makeFaceTexture(cid) {
+  if (faceTexCache[cid]) return faceTexCache[cid];
+  const W = 256, H = 356;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+
+  ctx.fillStyle = '#fbfaf6'; roundRectPath(ctx, 0, 0, W, H, 22); ctx.fill();
+  ctx.strokeStyle = '#d8d4c8'; ctx.lineWidth = 3;
+  roundRectPath(ctx, 5, 5, W - 10, H - 10, 18); ctx.stroke();
+
+  const col = isRed(cid) ? '#c8102e' : '#141821';
+  const r = cardRank(cid), sym = SUIT_SYM[cardSuit(cid)];
+  ctx.fillStyle = col;
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 150px Georgia, serif';
+  ctx.globalAlpha = 0.13; ctx.fillText(sym, W / 2, H / 2 + 6); ctx.globalAlpha = 1;
+
+  ctx.font = 'bold 88px Georgia, serif';
+  ctx.fillText(r, W / 2, H / 2 - 26);
+  ctx.font = 'bold 62px Georgia, serif';
+  ctx.fillText(sym, W / 2, H / 2 + 62);
+
+  // corner indices
+  const corner = (x, y, flip) => {
+    ctx.save(); ctx.translate(x, y); if (flip) ctx.rotate(Math.PI);
+    ctx.font = 'bold 44px Georgia, serif'; ctx.fillText(r, 0, 0);
+    ctx.font = 'bold 36px Georgia, serif'; ctx.fillText(sym, 0, 38);
+    ctx.restore();
+  };
+  corner(36, 44, false); corner(W - 36, H - 44, true);
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.anisotropy = 8;
+  faceTexCache[cid] = tex;
+  return tex;
+}
+
+function makeBackTexture() {
+  if (backTex) return backTex;
+  const W = 256, H = 356;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#f4f2ec'; roundRectPath(ctx, 0, 0, W, H, 22); ctx.fill();
+  const g = ctx.createLinearGradient(0, 0, W, H);
+  g.addColorStop(0, '#1d3f6e'); g.addColorStop(.5, '#2a5f9e'); g.addColorStop(1, '#16304f');
+  ctx.fillStyle = g; roundRectPath(ctx, 12, 12, W - 24, H - 24, 14); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 2;
+  for (let i = -H; i < W; i += 16) {
+    ctx.beginPath(); ctx.moveTo(i, 12); ctx.lineTo(i + H, H - 12); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(i, H - 12); ctx.lineTo(i + H, 12); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 4;
+  roundRectPath(ctx, 26, 26, W - 52, H - 52, 10); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 30px Georgia, serif'; ctx.fillText('LIT', W / 2, H / 2);
+  backTex = new THREE.CanvasTexture(cv); backTex.anisotropy = 8;
+  return backTex;
+}
+
+function makeLabelSprite(text, cssColor) {
+  const cv = document.createElement('canvas'); cv.width = 256; cv.height = 72;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = 'rgba(8,14,20,.8)'; roundRectPath(ctx, 4, 4, 248, 64, 14); ctx.fill();
+  ctx.strokeStyle = cssColor; ctx.lineWidth = 3; roundRectPath(ctx, 4, 4, 248, 64, 14); ctx.stroke();
+  ctx.fillStyle = '#f2f7fc'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 30px Segoe UI, sans-serif'; ctx.fillText(text, 128, 38);
+  const t = new THREE.CanvasTexture(cv);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthTest: false }));
+  sp.scale.set(2.4, 0.68, 1);
+  return sp;
+}
+
+/* --- rounded card geometry --- */
+function roundedShape(w, h, r) {
+  const s = new THREE.Shape();
+  const x = -w / 2, y = -h / 2;
+  s.moveTo(x + r, y);
+  s.lineTo(x + w - r, y); s.quadraticCurveTo(x + w, y, x + w, y + r);
+  s.lineTo(x + w, y + h - r); s.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  s.lineTo(x + r, y + h); s.quadraticCurveTo(x, y + h, x, y + h - r);
+  s.lineTo(x, y + r); s.quadraticCurveTo(x, y, x + r, y);
+  return s;
+}
+function fixUV(geo, w, h) {
+  const pos = geo.attributes.position, uv = geo.attributes.uv;
+  for (let i = 0; i < pos.count; i++) {
+    uv.setXY(i, (pos.getX(i) + w / 2) / w, (pos.getY(i) + h / 2) / h);
+  }
+  uv.needsUpdate = true;
+}
+let SHARED_BODY = null, SHARED_FACE = null;
+function cardGeoms() {
+  if (!SHARED_BODY) {
+    const shp = roundedShape(CARD_W, CARD_H, 0.11);
+    SHARED_BODY = new THREE.ExtrudeGeometry(shp, { depth: CARD_D, bevelEnabled: false, curveSegments: 5 });
+    SHARED_BODY.translate(0, 0, -CARD_D / 2);
+    fixUV(SHARED_BODY, CARD_W, CARD_H);
+    SHARED_FACE = new THREE.ShapeGeometry(shp, 5);
+    fixUV(SHARED_FACE, CARD_W, CARD_H);
+  }
+  return [SHARED_BODY, SHARED_FACE];
+}
+
+function buildCardMesh(cid) {
+  const [bodyGeo, faceGeo] = cardGeoms();
+  const grp = new THREE.Group();
+  grp.rotation.order = 'YXZ';
+
+  const body = new THREE.Mesh(bodyGeo, new THREE.MeshStandardMaterial({
+    color: 0xf6f4ee, roughness: .85, metalness: .02
+  }));
+  body.castShadow = true; body.receiveShadow = true;
+  grp.add(body);
+
+  const front = new THREE.Mesh(faceGeo, new THREE.MeshStandardMaterial({
+    map: makeFaceTexture(cid), roughness: .78, metalness: .0
+  }));
+  front.position.z = CARD_D / 2 + 0.002;
+  grp.add(front);
+
+  const back = new THREE.Mesh(faceGeo, new THREE.MeshStandardMaterial({
+    map: makeBackTexture(), roughness: .78, metalness: .0
+  }));
+  back.position.z = -CARD_D / 2 - 0.002;
+  back.rotation.y = Math.PI;
+  grp.add(back);
+
+  grp.userData.cardId = cid;
+  grp.userData.pickTargets = [body, front, back];
+  return grp;
+}
+
+function initThree() {
+  const app = document.getElementById('app');
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  app.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x080d12);
+  scene.fog = new THREE.Fog(0x080d12, 30, 70);
+
+  camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 300);
+  camera.position.set(0, 15.5, 15.5);
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 0, 1.2);
+  controls.enableDamping = true; controls.dampingFactor = 0.08;
+  controls.minDistance = 15; controls.maxDistance = 45;
+  controls.minPolarAngle = 0.18; controls.maxPolarAngle = 1.16;
+  controls.enablePan = false;
+  controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+  controls.update();
+
+  raycaster = new THREE.Raycaster();
+  pointer = new THREE.Vector2();
+
+  /* lighting */
+  scene.add(new THREE.AmbientLight(0xbfd4ea, 0.55));
+  const key = new THREE.DirectionalLight(0xffffff, 0.95);
+  key.position.set(6, 22, 10);
+  key.castShadow = true;
+  key.shadow.mapSize.set(2048, 2048);
+  key.shadow.camera.left = -18; key.shadow.camera.right = 18;
+  key.shadow.camera.top = 18; key.shadow.camera.bottom = -18;
+  key.shadow.camera.near = 1; key.shadow.camera.far = 60;
+  key.shadow.bias = -0.0009;
+  scene.add(key);
+  const rim = new THREE.DirectionalLight(0x6fa8e0, 0.35);
+  rim.position.set(-10, 8, -12); scene.add(rim);
+  const bounce = new THREE.PointLight(0x2f6f4f, 0.5, 40);
+  bounce.position.set(0, 4, 0); scene.add(bounce);
+
+  buildTable();
+  buildSeats();
+
+  /* floor */
+  const floor = new THREE.Mesh(
+    new THREE.CircleGeometry(40, 64),
+    new THREE.MeshStandardMaterial({ color: 0x0d151d, roughness: .95 })
+  );
+  floor.rotation.x = -Math.PI / 2; floor.position.y = -1.6;
+  floor.receiveShadow = true;
+  scene.add(floor);
+
+  window.addEventListener('resize', onResize);
+  renderer.domElement.addEventListener('pointermove', onPointerMove);
+  renderer.domElement.addEventListener('pointerdown', onPointerDown);
+  renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+}
+
+function buildTable() {
+  const felt = new THREE.Mesh(
+    new THREE.CylinderGeometry(TABLE_R, TABLE_R, 0.5, 72),
+    new THREE.MeshStandardMaterial({ color: 0x1d6b46, roughness: .95, metalness: 0 })
+  );
+  felt.position.y = -0.25; felt.receiveShadow = true; scene.add(felt);
+
+  const rim = new THREE.Mesh(
+    new THREE.TorusGeometry(TABLE_R + 0.32, 0.55, 18, 80),
+    new THREE.MeshStandardMaterial({ color: 0x5a3720, roughness: .55, metalness: .18 })
+  );
+  rim.rotation.x = Math.PI / 2; rim.position.y = -0.12;
+  rim.castShadow = true; rim.receiveShadow = true; scene.add(rim);
+
+  const base = new THREE.Mesh(
+    new THREE.CylinderGeometry(2.6, 3.6, 1.3, 32),
+    new THREE.MeshStandardMaterial({ color: 0x3f2717, roughness: .7 })
+  );
+  base.position.y = -1.1; base.castShadow = true; scene.add(base);
+
+  const inlay = new THREE.Mesh(
+    new THREE.RingGeometry(3.6, 3.75, 72),
+    new THREE.MeshBasicMaterial({ color: 0x2f8f60, transparent: true, opacity: .35, side: THREE.DoubleSide })
+  );
+  inlay.rotation.x = -Math.PI / 2; inlay.position.y = 0.011; scene.add(inlay);
+}
+
+function buildSeats() {
+  for (let i = 0; i < 6; i++) {
+    const grp = new THREE.Group();
+    const p = seatPos(i, AVATAR_R);
+    grp.position.copy(p);
+    grp.lookAt(0, 0, 0);
+
+    const col = TEAM_HEX[SEAT_TEAM[i]];
+    const ped = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.85, 1.05, 1.5, 24),
+      new THREE.MeshStandardMaterial({ color: 0x223243, roughness: .8 })
+    );
+    ped.position.y = -0.4; ped.castShadow = true; grp.add(ped);
+
+    const torso = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.55, 0.78, 1.25, 20),
+      new THREE.MeshStandardMaterial({ color: col, roughness: .6, metalness: .12 })
+    );
+    torso.position.y = 0.95; torso.castShadow = true; grp.add(torso);
+
+    const head = new THREE.Mesh(
+      new THREE.SphereGeometry(0.42, 24, 18),
+      new THREE.MeshStandardMaterial({ color: 0xd7b393, roughness: .75 })
+    );
+    head.position.y = 1.92; head.castShadow = true; grp.add(head);
+
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(1.15, 0.09, 10, 40),
+      new THREE.MeshBasicMaterial({ color: 0xffdd66, transparent: true, opacity: 0 })
+    );
+    ring.rotation.x = Math.PI / 2; ring.position.y = -1.05;
+    grp.add(ring); seatRings.push(ring);
+
+    const lbl = makeLabelSprite(SEAT_NAMES[i], TEAM_CSS[SEAT_TEAM[i]]);
+    lbl.position.set(0, 2.85, 0);
+    grp.add(lbl);
+    grp.userData.labelSprite = lbl;
+
+    grp.userData.seat = i;
+    grp.userData.pickTargets = [ped, torso, head];
+    scene.add(grp);
+    seatMeshes.push(grp);
+  }
+}
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+/* ------------------------- 5. CARD LAYOUT & ANIMATION ------------------- */
+
+const DECK_ORIGIN = new THREE.Vector3(0, 0.6, 0);
+
+function handTransform(seat, idx, count) {
+  const t = { pos: new THREE.Vector3(), rot: new THREE.Euler(0, 0, 0, 'YXZ') };
+  if (seat === 0) {
+    // interactive arc in front of the camera
+    const spread = 0.95, arc = 0.055;
+    const mid = (count - 1) / 2;
+    const off = (idx - mid);
+    t.pos.set(off * spread, 2.35 - Math.abs(off) * arc * 1.1, 9.6 + Math.abs(off) * 0.16);
+    t.rot.set(-Math.PI / 2 + 0.72, 0, -off * 0.045);
+  } else {
+    const a = seatAngle(seat);
+    const radial = new THREE.Vector3(Math.cos(a), 0, Math.sin(a));
+    const tang = new THREE.Vector3(-Math.sin(a), 0, Math.cos(a));
+    const mid = (count - 1) / 2;
+    const off = (idx - mid);
+    t.pos.copy(radial).multiplyScalar(SEAT_R * 0.79)
+      .addScaledVector(tang, off * 0.44);
+    t.pos.y = 0.06 + idx * 0.012;
+    t.rot.set(Math.PI / 2, -Math.PI / 2 - a, off * 0.05);
+  }
+  return t;
+}
+
+function tweenCardTo(mesh, pos, rot, dur, delay, onDone) {
+  new TWEEN.Tween(mesh.position)
+    .to({ x: pos.x, y: pos.y, z: pos.z }, dur)
+    .delay(delay || 0)
+    .easing(TWEEN.Easing.Cubic.InOut)
+    .onComplete(() => { if (onDone) onDone(); })
+    .start();
+  new TWEEN.Tween(mesh.rotation)
+    .to({ x: rot.x, y: rot.y, z: rot.z }, dur)
+    .delay(delay || 0)
+    .easing(TWEEN.Easing.Cubic.InOut)
+    .start();
+}
+
+function layoutAll(dur = 520) {
+  for (const p of G.players) {
+    p.hand.forEach((cid, i) => {
+      const m = cardMeshes[cid];
+      if (!m) return;
+      const t = handTransform(p.seat, i, p.hand.length);
+      if (selectedHandCard === cid && p.seat === 0) { t.pos.y += 0.75; t.pos.z -= 0.35; }
+      tweenCardTo(m, t.pos, t.rot, dur, 0);
+    });
+  }
+}
+
+/** Arcing flight for a transferred card. */
+function flyCard(cid, fromSeat, toSeat, onDone) {
+  const m = cardMeshes[cid];
+  if (!m) { if (onDone) onDone(); return; }
+  const start = m.position.clone();
+  const mid = start.clone().lerp(new THREE.Vector3(0, 0, 0), 0.5); mid.y += 3.6;
+  const obj = { t: 0 };
+  const endT = handTransform(toSeat, 0, 1);
+  new TWEEN.Tween(obj).to({ t: 1 }, 780).easing(TWEEN.Easing.Quadratic.InOut)
+    .onUpdate(() => {
+      const u = obj.t;
+      const a = start.clone().lerp(mid, u), b = mid.clone().lerp(endT.pos, u);
+      m.position.copy(a.lerp(b, u));
+      m.rotation.x = THREE.MathUtils.lerp(m.rotation.x, endT.rot.x, 0.08);
+      m.rotation.y += 0.09;
+    })
+    .onComplete(() => { if (onDone) onDone(); })
+    .start();
+}
+
+function discardSet(hs, winningTeam, onDone) {
+  const cards = HS_CARDS[hs];
+  let done = 0;
+  cards.forEach((cid, i) => {
+    const m = cardMeshes[cid];
+    if (!m) { done++; return; }
+    const a = (i / cards.length) * Math.PI * 2;
+    const target = new THREE.Vector3(Math.cos(a) * 1.5, 0.09 + i * 0.02, Math.sin(a) * 1.5);
+    tweenCardTo(m, target, new THREE.Euler(Math.PI / 2, a, 0, 'YXZ'), 620, i * 45);
+    const fade = { s: 1 };
+    new TWEEN.Tween(fade).to({ s: 0.001 }, 420).delay(700 + i * 45)
+      .easing(TWEEN.Easing.Quadratic.In)
+      .onUpdate(() => m.scale.setScalar(fade.s))
+      .onComplete(() => {
+        scene.remove(m);
+        delete cardMeshes[cid];
+        done++;
+        if (done === cards.length && onDone) onDone();
+      }).start();
+  });
+  if (done === cards.length && onDone) onDone();
+}
+
+/* ------------------------- 6. INPUT / PICKING --------------------------- */
+
+function pickList() {
+  const arr = [];
+  for (const cid of G.players[0].hand) {
+    const m = cardMeshes[cid];
+    if (m) arr.push(...m.userData.pickTargets);
+  }
+  for (const s of seatMeshes) arr.push(...s.userData.pickTargets);
+  return arr;
+}
+function resolvePick(obj) {
+  let o = obj;
+  while (o) {
+    if (o.userData && o.userData.cardId) return { type: 'card', id: o.userData.cardId };
+    if (o.userData && o.userData.seat !== undefined) return { type: 'seat', id: o.userData.seat };
+    o = o.parent;
+  }
+  return null;
+}
+function screenPick(ev) {
+  const r = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((ev.clientX - r.left) / r.width) * 2 - 1;
+  pointer.y = -((ev.clientY - r.top) / r.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(pickList(), false);
+  return hits.length ? resolvePick(hits[0].object) : null;
+}
+function onPointerMove(ev) {
+  if (G.state === STATE.GAME_OVER) return;
+  const p = screenPick(ev);
+  hoverSeat = (p && p.type === 'seat') ? p.id : -1;
+  renderer.domElement.style.cursor = p ? 'pointer' : 'default';
+}
+function onPointerDown(ev) {
+  if (ev.button !== 0) return;
+  const p = screenPick(ev);
+  if (!p) return;
+  if (p.type === 'card') {
+    selectedHandCard = (selectedHandCard === p.id) ? null : p.id;
+    layoutAll(240);
+    if (selectedHandCard) {
+      const hs = CARD_HS[selectedHandCard];
+      const mine = G.players[0].hand.filter(c => CARD_HS[c] === hs).map(cardLabel).join(' ');
+      setMsg(cardLabel(selectedHandCard) + '  —  ' + HS_NAME[hs] + '   (you hold: ' + mine + ')');
+    }
+  } else if (p.type === 'seat') {
+    if (isHumanTurn() && SEAT_TEAM[p.id] !== 0 && G.players[p.id].hand.length > 0) {
+      openAskModal(p.id);
+    } else if (SEAT_TEAM[p.id] === 0) {
+      setMsg(SEAT_NAMES[p.id] + ' is your teammate — you may not ask them for cards.');
+    } else if (G.players[p.id].hand.length === 0) {
+      setMsg(SEAT_NAMES[p.id] + ' has no cards left and cannot be asked.');
+    }
+  }
+}
+
+/* ------------------------- 7. HUD ------------------------------------- */
+
+const el = id => document.getElementById(id);
+
+function setTitle(t) { el('turnTitle').innerHTML = t; }
+function setMsg(t) { el('turnMsg').textContent = t || ''; }
+
+function log(text, cls) {
+  const d = document.createElement('div');
+  d.className = cls || '';
+  d.textContent = text;
+  const list = el('logList');
+  list.appendChild(d);
+  list.scrollTop = list.scrollHeight;
+}
+
+function refreshScore() {
+  el('scoreA').textContent = G.scores[0];
+  el('scoreB').textContent = G.scores[1];
+  for (const [t, node] of [[0, el('setsA')], [1, el('setsB')]]) {
+    node.innerHTML = '';
+    for (const hs of G.claimedSets[t]) {
+      const s = document.createElement('span');
+      s.className = 'setIcon';
+      s.style.color = isRed(HS_CARDS[hs][0]) ? '#ff8a8a' : '#e6edf5';
+      s.textContent = (hs.endsWith('minor') ? 'm' : 'M') + SUIT_SYM[hs[0]];
+      s.title = HS_NAME[hs];
+      node.appendChild(s);
+    }
+  }
+}
+
+function refreshTurnUI() {
+  const p = G.players[G.turn];
+  const col = TEAM_CSS[p.team];
+  setTitle('<span style="color:' + col + '">' + p.name + "'s turn</span> " +
+    '<span style="opacity:.55;font-weight:400">(' + TEAM_NAME[p.team] + ')</span>');
+  for (let i = 0; i < 6; i++) {
+    const active = (i === G.turn);
+    seatRings[i].material.opacity = active ? 0.9 : 0.0;
+    seatRings[i].material.color.setHex(TEAM_HEX[SEAT_TEAM[i]]);
+    const ped = seatMeshes[i].userData.pickTargets[0];
+    ped.material.emissive = ped.material.emissive || new THREE.Color(0, 0, 0);
+    ped.material.emissive.setHex(active ? 0x304a1e : 0x000000);
+    seatMeshes[i].userData.labelSprite.material.opacity = G.players[i].hand.length ? 1 : 0.35;
+  }
+  const human = isHumanTurn();
+  el('btnAsk').disabled = !human || G.busy || !humanHasLegalAsk();
+  el('btnDeclare').disabled = !human || G.busy;
+}
+
+function isHumanTurn() {
+  return G.state === STATE.TURN_IDLE && G.turn === 0 && !G.busy;
+}
+
+/* ------------------------- 8. GAME FLOW -------------------------------- */
+
+function newGame() {
+  G.state = STATE.INITIALIZING;
+  G.scores = [0, 0];
+  G.claimedSets = [[], []];
+  G.claimed = {};
+  G.busy = true;
+  selectedHandCard = null;
+  makePlayers();
+  resetPK();
+
+  // clear old meshes
+  for (const k of Object.keys(cardMeshes)) { scene.remove(cardMeshes[k]); delete cardMeshes[k]; }
+  el('logList').innerHTML = '';
+  el('gameOver').classList.remove('show');
+  refreshScore();
+
+  const deck = shuffle(ALL_CARDS.slice());
+  for (let i = 0; i < deck.length; i++) {
+    G.players[i % 6].hand.push(deck[i]);
+  }
+  for (const p of G.players) p.hand.sort(handSort);
+
+  // build meshes stacked at centre
+  deck.forEach((cid, i) => {
+    const m = buildCardMesh(cid);
+    m.position.set(0, 0.35 + i * 0.02, 0);
+    m.rotation.set(Math.PI / 2, Math.random() * 0.1, 0);
+    scene.add(m);
+    cardMeshes[cid] = m;
+  });
+
+  log('New match — 48 cards, 8 half-suits, 8 cards each.', 'sys');
+  setTitle('Dealing…'); setMsg('');
+  G.state = STATE.DEALING;
+
+  // deal animation
+  let d = 0;
+  for (let round = 0; round < 8; round++) {
+    for (let s = 0; s < 6; s++) {
+      const cid = G.players[s].hand[round];
+      const m = cardMeshes[cid];
+      const t = handTransform(s, round, 8);
+      tweenCardTo(m, t.pos, t.rot, 460, d * 42);
+      d++;
+    }
+  }
+  setTimeout(() => {
+    G.busy = false;
+    G.turn = 0;
+    G.state = STATE.TURN_IDLE;
+    log('You lead the first turn.', 'sys');
+    runInference();
+    beginTurn();
+  }, 48 * 42 + 620);
+}
+
+const RANK_ORDER = ['2', '3', '4', '5', '6', '7', '9', '10', 'J', 'Q', 'K', 'A'];
+function handSort(a, b) {
+  const sa = SUITS.indexOf(cardSuit(a)), sb = SUITS.indexOf(cardSuit(b));
+  if (sa !== sb) return sa - sb;
+  return RANK_ORDER.indexOf(cardRank(a)) - RANK_ORDER.indexOf(cardRank(b));
+}
+
+function beginTurn() {
+  if (G.state === STATE.GAME_OVER) return;
+  G.state = STATE.TURN_IDLE;
+  // seat must have cards
+  if (G.players[G.turn].hand.length === 0) {
+    const next = findTurnHolder(G.turn);
+    if (next < 0) { endMatch(); return; }
+    if (next !== G.turn) {
+      log(SEAT_NAMES[G.turn] + ' is out of cards — turn passes to ' + SEAT_NAMES[next] + '.', 'sys');
+      G.turn = next;
+    }
+  }
+  refreshTurnUI();
+  if (G.turn === 0) {
+    if (!humanHasLegalAsk()) {
+      setMsg('You have no legal ask left — you must declare a half-suit.');
+    } else {
+      setMsg('Click an opponent, or use the Ask button.');
+    }
+  } else {
+    setMsg('Thinking…');
+    setTimeout(() => botTurn(G.turn), 900 + Math.random() * 500);
+  }
+}
+
+/** Prefer a teammate with cards, else anyone with cards. */
+function findTurnHolder(seat) {
+  const team = SEAT_TEAM[seat];
+  if (G.players[seat].hand.length > 0) return seat;
+  const mates = teamMates(team).filter(p => p.hand.length > 0);
+  if (mates.length) return mates[Math.floor(Math.random() * mates.length)].seat;
+  const any = G.players.filter(p => p.hand.length > 0);
+  if (any.length) return any[Math.floor(Math.random() * any.length)].seat;
+  return -1;
+}
+
+function humanHasLegalAsk() {
+  const me = G.players[0];
+  if (!me.hand.length) return false;
+  const sets = new Set(me.hand.map(c => CARD_HS[c]).filter(hsLive));
+  for (const hs of sets) {
+    for (const cid of HS_CARDS[hs]) {
+      if (me.hand.includes(cid)) continue;
+      for (const o of opponentsOf(0)) {
+        if (o.hand.length && canAskForCard(0, o.seat, cid)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/* --- ASK resolution --- */
+function performAsk(askerSeat, targetSeat, cid) {
+  if (!canAskForCard(askerSeat, targetSeat, cid)) {
+    setMsg('Illegal ask.');
+    refreshTurnUI();
+    return;
+  }
+  G.state = STATE.RESOLVING_ASK;
+  G.busy = true;
+  selectedHandCard = null;
+  refreshTurnUI();
+
+  const A = G.players[askerSeat], T = G.players[targetSeat];
+  const hs = CARD_HS[cid];
+
+  // public inference: asker holds the half-suit and not this card
+  PK.hsHas[askerSeat].add(hs);
+  pkSetNot(askerSeat, cid);
+
+  const hit = T.hand.includes(cid);
+  const line = A.name + ' asked ' + T.name + ' for ' + cardLabel(cid);
+
+  if (hit) {
+    T.hand.splice(T.hand.indexOf(cid), 1);
+    A.hand.push(cid);
+    A.hand.sort(handSort);
+    pkSetHas(askerSeat, cid);
+    runInference();
+    log(line + ' — HIT!', 'ok');
+    setMsg(line + ' — successful! ' + A.name + ' continues.');
+    flyCard(cid, targetSeat, askerSeat, () => {
+      layoutAll(420);
+      setTimeout(() => {
+        G.busy = false;
+        G.turn = askerSeat;
+        checkWinAndContinue();
+      }, 460);
+    });
+  } else {
+    pkSetNot(targetSeat, cid);
+    runInference();
+    log(line + ' — miss.', 'no');
+    setMsg(line + ' — no luck. Turn passes to ' + T.name + '.');
+    const m = cardMeshes[cid];
+    // shake the target's fan a touch for feedback
+    const bump = { v: 0 };
+    new TWEEN.Tween(bump).to({ v: 1 }, 420).easing(TWEEN.Easing.Quadratic.Out).start();
+    setTimeout(() => {
+      G.busy = false;
+      G.turn = targetSeat;
+      checkWinAndContinue();
+    }, 900);
+  }
+}
+
+/* --- CLAIM resolution --- */
+function performClaim(callerSeat, hs, assignment) {
+  G.state = STATE.RESOLVING_CLAIM;
+  G.busy = true;
+  refreshTurnUI();
+
+  const caller = G.players[callerSeat];
+  const correct = validateClaim(callerSeat, hs, assignment);
+  const winTeam = correct ? caller.team : (1 - caller.team);
+
+  const truth = HS_CARDS[hs].map(c => {
+    const o = ownerOf(c);
+    return cardLabel(c) + '→' + (o < 0 ? '—' : SEAT_NAMES[o]);
+  }).join(', ');
+
+  G.claimed[hs] = winTeam;
+  G.claimedSets[winTeam].push(hs);
+  G.scores[winTeam]++;
+
+  // remove from every hand
+  for (const p of G.players) p.hand = p.hand.filter(c => CARD_HS[c] !== hs);
+  HS_CARDS[hs].forEach(pkForgetCard);
+  for (let s = 0; s < 6; s++) PK.hsHas[s].delete(hs);
+  runInference();
+
+  const verdict = correct ? 'CORRECT' : 'WRONG';
+  log(caller.name + ' declared ' + HS_NAME[hs] + ' — ' + verdict +
+      '. Point to ' + TEAM_NAME[winTeam] + '.', 'cl');
+  log('   Actual: ' + truth, 'sys');
+  setMsg(caller.name + ' declared ' + HS_NAME[hs] + ' — ' + verdict + '! ' +
+         TEAM_NAME[winTeam] + ' takes the set.');
+  refreshScore();
+
+  discardSet(hs, winTeam, () => {
+    layoutAll(420);
+    setTimeout(() => {
+      G.busy = false;
+      // caller keeps the turn if they still hold cards
+      G.turn = callerSeat;
+      checkWinAndContinue();
+    }, 460);
+  });
+}
+
+function checkWinAndContinue() {
+  G.state = STATE.CHECK_WIN;
+  refreshScore();
+  const declared = HS_LIST.filter(h => !hsLive(h)).length;
+  if (G.scores[0] > 4 || G.scores[1] > 4 || declared === 8) { endMatch(); return; }
+  const alive = G.players.some(p => p.hand.length > 0);
+  if (!alive) { endMatch(); return; }
+  beginTurn();
+}
+
+function endMatch() {
+  G.state = STATE.GAME_OVER;
+  G.busy = true;
+  refreshScore();
+  refreshTurnUI();
+  const a = G.scores[0], b = G.scores[1];
+  const t = el('goTitle'), s = el('goSub');
+  if (a > b) { t.textContent = 'TEAM BLUE WINS'; t.style.color = TEAM_CSS[0]; }
+  else if (b > a) { t.textContent = 'TEAM RED WINS'; t.style.color = TEAM_CSS[1]; }
+  else { t.textContent = 'DRAW'; t.style.color = '#ffd479'; }
+  s.textContent = 'Final score — Blue ' + a + '  :  ' + b + ' Red';
+  setTitle('Match complete'); setMsg('');
+  log('Match over. Blue ' + a + ' — Red ' + b + '.', 'cl');
+  el('gameOver').classList.add('show');
+}
+
+/* ------------------------- 9. BOT AI ----------------------------------- */
+
+/** What the bot believes about a card: seat number, or -1. */
+function botOwnerBelief(bot, cid) {
+  if (bot.hand.includes(cid)) return bot.seat;
+  return pkKnownOwner(cid);
+}
+
+/** Attempt a certain claim. Returns {hs, assignment} or null. */
+function botFindCertainClaim(bot) {
+  for (const hs of HS_LIST) {
+    if (!hsLive(hs)) continue;
+    // must be relevant: bot's team should plausibly hold it
+    const assignment = {};
+    let ok = true;
+    for (const cid of HS_CARDS[hs]) {
+      const o = botOwnerBelief(bot, cid);
+      if (o < 0 || SEAT_TEAM[o] !== bot.team) { ok = false; break; }
+      assignment[cid] = o;
+    }
+    if (ok) return { hs, assignment };
+  }
+  return null;
+}
+
+/** Best-effort claim when no legal ask exists (forced declaration). */
+function botForcedClaim(bot) {
+  const mates = teamMates(bot.team);
+  let best = null, bestScore = -1;
+  for (const hs of HS_LIST) {
+    if (!hsLive(hs)) continue;
+    let score = 0;
+    const assignment = {};
+    for (const cid of HS_CARDS[hs]) {
+      const o = botOwnerBelief(bot, cid);
+      if (o >= 0 && SEAT_TEAM[o] === bot.team) { assignment[cid] = o; score += 2; }
+      else if (o >= 0) { score -= 3; assignment[cid] = bot.seat; }
+      else {
+        // guess a teammate that still holds cards
+        const cand = mates.filter(m => m.hand.length > 0 && !PK.not[m.seat].has(cid));
+        const pick = cand.length ? cand[Math.floor(Math.random() * cand.length)] : mates[0];
+        assignment[cid] = pick.seat;
+      }
+    }
+    if (score > bestScore) { bestScore = score; best = { hs, assignment }; }
+  }
+  return best;
+}
+
+function botChooseAsk(bot) {
+  const mySets = new Set(bot.hand.map(c => CARD_HS[c]).filter(hsLive));
+  const opps = opponentsOf(bot.team).filter(o => o.hand.length > 0);
+  let best = null, bestScore = -Infinity;
+
+  for (const hs of mySets) {
+    const mine = bot.hand.filter(c => CARD_HS[c] === hs).length;
+    for (const cid of HS_CARDS[hs]) {
+      if (bot.hand.includes(cid)) continue;
+      const known = pkKnownOwner(cid);
+      for (const o of opps) {
+        if (!canAskForCard(bot.seat, o.seat, cid)) continue;
+        if (PK.not[o.seat].has(cid)) continue;
+        if (known >= 0 && known !== o.seat) continue;
+
+        let score;
+        if (known === o.seat) {
+          score = 1000;                                    // guaranteed hit
+        } else {
+          score = 20;
+          score += mine * 6;                               // finishing sets is valuable
+          if (PK.hsHas[o.seat].has(hs)) score += 22;       // they showed interest in this set
+          score += o.hand.length * 1.2;                    // bigger hand, better odds
+          // penalise cards our own team already knows are elsewhere
+          const others = opps.filter(x => x !== o && !PK.not[x.seat].has(cid)).length;
+          score -= others * 2.5;
+          score += Math.random() * 6;
+        }
+        if (score > bestScore) { bestScore = score; best = { target: o.seat, card: cid }; }
+      }
+    }
+  }
+  return best;
+}
+
+function botTurn(seat) {
+  if (G.state === STATE.GAME_OVER) return;
+  const bot = G.players[seat];
+  if (bot.hand.length === 0) { G.turn = findTurnHolder(seat); beginTurn(); return; }
+
+  runInference();
+
+  const claim = botFindCertainClaim(bot);
+  if (claim) { performClaim(seat, claim.hs, claim.assignment); return; }
+
+  const ask = botChooseAsk(bot);
+  if (ask) { performAsk(seat, ask.target, ask.card); return; }
+
+  const forced = botForcedClaim(bot);
+  if (forced) {
+    log(bot.name + ' has no legal ask and must declare.', 'sys');
+    performClaim(seat, forced.hs, forced.assignment);
+    return;
+  }
+  // absolute fallback
+  G.turn = findTurnHolder(seat);
+  if (G.turn < 0) endMatch(); else beginTurn();
+}
+
+/* ------------------------- 10. ASK MODAL UI ---------------------------- */
+
+let askSel = { opp: null, hs: null, card: null };
+
+function openAskModal(preOpp) {
+  if (!isHumanTurn()) return;
+  askSel = { opp: (preOpp !== undefined ? preOpp : null), hs: null, card: null };
+  renderAskModal();
+  el('askModal').classList.add('show');
+}
+function closeAskModal() { el('askModal').classList.remove('show'); }
+
+function renderAskModal() {
+  const me = G.players[0];
+
+  // opponents
+  const oppBox = el('askOpps'); oppBox.innerHTML = '';
+  for (const o of opponentsOf(0)) {
+    const c = document.createElement('div');
+    c.className = 'chip' + (askSel.opp === o.seat ? ' sel' : '');
+    c.textContent = o.name + ' (' + o.hand.length + ')';
+    if (o.hand.length === 0) { c.style.opacity = .35; c.style.cursor = 'not-allowed'; }
+    else c.onclick = () => { askSel.opp = o.seat; askSel.card = null; renderAskModal(); };
+    oppBox.appendChild(c);
+  }
+
+  // half-suits I hold
+  const setBox = el('askSets'); setBox.innerHTML = '';
+  const mySets = [...new Set(me.hand.map(c => CARD_HS[c]))].filter(hsLive).sort();
+  if (!mySets.length) setBox.innerHTML = '<span style="opacity:.6;font-size:12px">No eligible half-suits.</span>';
+  for (const hs of mySets) {
+    const c = document.createElement('div');
+    c.className = 'chip ' + (isRed(HS_CARDS[hs][0]) ? 'rd' : 'bk') + (askSel.hs === hs ? ' sel' : '');
+    const held = me.hand.filter(x => CARD_HS[x] === hs).length;
+    c.textContent = HS_NAME[hs] + ' · ' + held;
+    c.onclick = () => { askSel.hs = hs; askSel.card = null; renderAskModal(); };
+    setBox.appendChild(c);
+  }
+
+  // cards
+  const cardBox = el('askCards'); cardBox.innerHTML = '';
+  if (!askSel.hs) {
+    cardBox.innerHTML = '<span style="opacity:.6;font-size:12px">Pick a half-suit first.</span>';
+  } else {
+    const avail = HS_CARDS[askSel.hs].filter(c => !me.hand.includes(c));
+    if (!avail.length) cardBox.innerHTML = '<span style="opacity:.6;font-size:12px">You already hold this entire set — declare it!</span>';
+    for (const cid of avail) {
+      const c = document.createElement('div');
+      c.className = 'chip ' + (isRed(cid) ? 'rd' : 'bk') + (askSel.card === cid ? ' sel' : '');
+      c.textContent = cardLabel(cid);
+      c.onclick = () => { askSel.card = cid; renderAskModal(); };
+      cardBox.appendChild(c);
+    }
+  }
+
+  const ok = askSel.opp !== null && askSel.card && canAskForCard(0, askSel.opp, askSel.card);
+  el('askConfirm').disabled = !ok;
+}
+
+/* ------------------------- 11. DECLARE MODAL UI ------------------------ */
+
+function openDeclModal() {
+  if (!isHumanTurn()) return;
+  const sel = el('declSet');
+  sel.innerHTML = '';
+  const live = HS_LIST.filter(hsLive);
+  // sort so the sets you hold most of come first
+  const me = G.players[0];
+  live.sort((a, b) =>
+    me.hand.filter(c => CARD_HS[c] === b).length - me.hand.filter(c => CARD_HS[c] === a).length);
+  for (const hs of live) {
+    const o = document.createElement('option');
+    o.value = hs;
+    o.textContent = HS_NAME[hs] + '  (you hold ' + me.hand.filter(c => CARD_HS[c] === hs).length + ')';
+    sel.appendChild(o);
+  }
+  sel.onchange = renderDeclRows;
+  renderDeclRows();
+  el('declModal').classList.add('show');
+}
+function closeDeclModal() { el('declModal').classList.remove('show'); }
+
+function renderDeclRows() {
+  const hs = el('declSet').value;
+  const box = el('declRows'); box.innerHTML = '';
+  if (!hs) return;
+  const mates = teamMates(0);
+  const me = G.players[0];
+  for (const cid of HS_CARDS[hs]) {
+    const row = document.createElement('div'); row.className = 'declRow';
+    const lbl = document.createElement('div');
+    lbl.className = 'declCard';
+    lbl.style.color = isRed(cid) ? '#ff8080' : '#e6edf5';
+    lbl.textContent = cardLabel(cid);
+    const sel = document.createElement('select');
+    sel.dataset.card = cid;
+    for (const m of mates) {
+      const o = document.createElement('option');
+      o.value = m.seat; o.textContent = m.name;
+      sel.appendChild(o);
+    }
+    // sensible default: if it's in my hand, pick me
+    if (me.hand.includes(cid)) sel.value = '0';
+    row.appendChild(lbl); row.appendChild(sel);
+    box.appendChild(row);
+  }
+}
+
+/* ------------------------- 12. WIRING ---------------------------------- */
+
+function wireUI() {
+  el('btnAsk').onclick = () => openAskModal();
+  el('btnDeclare').onclick = () => openDeclModal();
+
+  el('askCancel').onclick = closeAskModal;
+  el('askConfirm').onclick = () => {
+    if (askSel.opp === null || !askSel.card) return;
+    closeAskModal();
+    performAsk(0, askSel.opp, askSel.card);
+  };
+
+  el('declCancel').onclick = closeDeclModal;
+  el('declConfirm').onclick = () => {
+    const hs = el('declSet').value;
+    if (!hs) return;
+    const assignment = {};
+    el('declRows').querySelectorAll('select').forEach(s => {
+      assignment[s.dataset.card] = parseInt(s.value, 10);
+    });
+    closeDeclModal();
+    performClaim(0, hs, assignment);
+  };
+
+  el('goRestart').onclick = () => { newGame(); };
+}
+
+/* ------------------------- 13. MAIN LOOP -------------------------------- */
+
+let clockPrev = 0;
+function animate(t) {
+  requestAnimationFrame(animate);
+  TWEEN.update(t);
+  controls.update();
+
+  // gentle idle motion on the active seat ring
+  const pulse = 0.65 + Math.sin(t * 0.004) * 0.3;
+  if (G.state !== STATE.GAME_OVER && seatRings[G.turn]) {
+    seatRings[G.turn].material.opacity = pulse;
+  }
+  // hover feedback on opponents
+  for (let i = 0; i < 6; i++) {
+    const torso = seatMeshes[i].userData.pickTargets[1];
+    const want = (i === hoverSeat) ? 1.06 : 1.0;
+    torso.scale.setScalar(THREE.MathUtils.lerp(torso.scale.x, want, 0.18));
+  }
+  renderer.render(scene, camera);
+}
+
+/* ------------------------- 14. BOOT ------------------------------------ */
+
+(function boot() {
+  if (typeof THREE === 'undefined' || typeof TWEEN === 'undefined') {
+    document.body.innerHTML =
+      '<div style="padding:40px;font:16px sans-serif;color:#fff">' +
+      'Failed to load Three.js / TWEEN.js from CDN. Check your internet connection.</div>';
+    return;
+  }
+  initThree();
+  wireUI();
+  requestAnimationFrame(animate);
+  newGame();
+})();
+</script>
+</body>
+</html>
