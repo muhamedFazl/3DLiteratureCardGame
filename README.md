@@ -88,9 +88,16 @@ punch fails. In practice:
   symmetric NAT.
 - Corporate/university networks — often blocked outright.
 
+**Diagnosing a failure.** Open `tests/netcheck.html` on each device that cannot
+connect and press Run. It checks WebRTC locally, checks the broker, then asks two
+different STUN servers for your public address. If they report the **same IP but
+different ports**, you are behind a symmetric NAT: hole punching cannot work, and
+that is a property of the network rather than of this code.
+
 To close that gap, add a TURN relay to `TURN_SERVERS` in `src/net.js`. A relay
 only forwards bytes; WebRTC data channels are DTLS-encrypted end to end, so a
-TURN operator cannot read anyone'''s cards.
+TURN operator cannot read anyone's cards. Nothing else about the architecture
+changes: still no game server, still static hosting.
 
 ---
 

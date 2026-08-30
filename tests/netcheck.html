@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Literature — connectivity check</title>
+<style>
+  body { background:#0a0f14; color:#e8eef5; font:14px/1.6 "Segoe UI",system-ui,sans-serif;
+         margin:0; padding:28px 20px; max-width:760px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { opacity:.55; font-size:13px; margin-bottom:20px; }
+  button { font:inherit; font-weight:600; color:#eaf2fa; cursor:pointer; padding:11px 20px;
+           background:linear-gradient(#2f6fb5,#1d4a7d); border:1px solid #4b8fd6; border-radius:8px; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  pre { margin-top:18px; padding:16px; background:#0c161f; border:1px solid #24374a;
+        border-radius:8px; white-space:pre-wrap; word-break:break-word;
+        font:12.5px/1.7 ui-monospace,Consolas,monospace; }
+  .ok { color:#7fe3a0; font-weight:700; }
+  .bad { color:#ff9a9a; font-weight:700; }
+  .warn { color:#ffd479; font-weight:700; }
+  .verdict { margin-top:18px; padding:16px; border-radius:8px; border:1px solid #24374a;
+             background:#101c26; font-size:14px; line-height:1.6; }
+  code { background:#182837; padding:1px 5px; border-radius:4px; font-size:12.5px; }
+</style>
+</head>
+<body>
+<h1>Connectivity check</h1>
+<div class="sub">Measures whether peer-to-peer play can work from <em>this</em> device and network.
+Run it on both machines that cannot connect — the answer is usually in the NAT line.</div>
+
+<button id="run">Run check</button>
+<pre id="out">Ready.</pre>
+<div class="verdict" id="verdict" style="display:none"></div>
+
+<script type="module">
+import { candidateType } from '../src/net.js';
+
+const out = document.getElementById('out');
+const verdictBox = document.getElementById('verdict');
+let log = '';
+const w = (line = '') => { log += line + '\n'; out.innerHTML = log; };
+
+const STUN_A = 'stun:stun.l.google.com:19302';
+const STUN_B = 'stun:stun.cloudflare.com:3478';
+
+/** Gather candidates against one STUN server; resolve with what we learned. */
+function gather(stunUrl, ms = 6000) {
+  return new Promise(resolve => {
+    const found = { host: 0, srflx: 0, relay: 0, prflx: 0, unknown: 0 };
+    const mapped = [];          // srflx "ip:port" seen via this server
+    let pc;
+    try {
+      pc = new RTCPeerConnection({ iceServers: [{ urls: stunUrl }] });
+    } catch (e) { resolve({ error: e.message, found, mapped }); return; }
+
+    const done = () => {
+      try { pc.close(); } catch (e) {}
+      clearTimeout(timer);
+      resolve({ found, mapped });
+    };
+    pc.onicecandidate = e => {
+      if (!e.candidate) return done();               // null = gathering complete
+      const c = e.candidate.candidate;
+      const t = candidateType(c);
+      found[t] = (found[t] || 0) + 1;
+      if (t === 'srflx') {
+        const parts = c.split(' ');                  // ...candidate:<f> <comp> <proto> <pri> <ip> <port> typ srflx
+        if (parts.length > 5) mapped.push(parts[4] + ':' + parts[5]);
+      }
+    };
+    pc.createDataChannel('probe');
+    pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => done());
+    const timer = setTimeout(done, ms);
+  });
+}
+
+/** Prove the WebRTC code path itself works, independent of any network. */
+function loopback(ms = 8000) {
+  return new Promise(resolve => {
+    const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+    let settled = false;
+    const finish = v => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { a.close(); b.close(); } catch (e) {}
+      resolve(v);
+    };
+    a.onicecandidate = e => e.candidate && b.addIceCandidate(e.candidate).catch(() => {});
+    b.onicecandidate = e => e.candidate && a.addIceCandidate(e.candidate).catch(() => {});
+    const ch = a.createDataChannel('t');
+    ch.onopen = () => { ch.send('ping'); };
+    b.ondatachannel = e => { e.channel.onmessage = m => finish(m.data === 'ping'); };
+    a.createOffer().then(o => a.setLocalDescription(o))
+      .then(() => b.setRemoteDescription(a.localDescription))
+      .then(() => b.createAnswer()).then(x => b.setLocalDescription(x))
+      .then(() => a.setRemoteDescription(b.localDescription))
+      .catch(() => finish(false));
+    const timer = setTimeout(() => finish(false), ms);
+  });
+}
+
+async function brokerCheck() {
+  try {
+    const net = await import('../src/net.js');
+    const sig = new net.Signal();
+    await sig.connect(() => {});
+    const url = sig.brokerUrl;
+    sig.close();
+    return url;
+  } catch (e) { return null; }
+}
+
+document.getElementById('run').onclick = async () => {
+  const btn = document.getElementById('run');
+  btn.disabled = true;
+  log = ''; verdictBox.style.display = 'none';
+  w('Running…\n');
+
+  // 1. WebRTC available at all?
+  if (!window.RTCPeerConnection) {
+    w('<span class="bad">WebRTC is unavailable in this browser.</span>');
+    btn.disabled = false; return;
+  }
+
+  // 2. does the WebRTC path work locally
+  w('1. WebRTC loopback (proves the code path, no network involved)');
+  const lb = await loopback();
+  w('   ' + (lb ? '<span class="ok">PASS</span> — data channels work on this device.'
+                : '<span class="bad">FAIL</span> — WebRTC is broken or blocked locally.'));
+  w();
+
+  // 3. signalling broker
+  w('2. Signalling broker (lobby discovery + handshake)');
+  const broker = await brokerCheck();
+  w('   ' + (broker ? '<span class="ok">PASS</span> — connected via ' + new URL(broker).hostname
+                    : '<span class="bad">FAIL</span> — no public MQTT broker reachable. ' +
+                      'Discovery and joining cannot work from this network at all.'));
+  w();
+
+  // 4. STUN reachability + NAT shape
+  w('3. STUN / NAT behaviour');
+  const [ra, rb] = await Promise.all([gather(STUN_A), gather(STUN_B)]);
+  const srflxA = ra.mapped, srflxB = rb.mapped;
+  w('   candidates via A: ' + JSON.stringify(ra.found));
+  w('   candidates via B: ' + JSON.stringify(rb.found));
+  w('   public mapping A: ' + (srflxA.length ? srflxA.join(', ') : '(none)'));
+  w('   public mapping B: ' + (srflxB.length ? srflxB.join(', ') : '(none)'));
+
+  let nat = 'unknown';
+  if (!srflxA.length && !srflxB.length) {
+    nat = 'blocked';
+  } else if (srflxA.length && srflxB.length) {
+    const ipA = srflxA[0].split(':')[0], portA = srflxA[0].split(':')[1];
+    const ipB = srflxB[0].split(':')[0], portB = srflxB[0].split(':')[1];
+    if (ipA !== ipB) nat = 'multi';
+    else nat = (portA === portB) ? 'cone' : 'symmetric';
+  }
+  w();
+
+  // 5. verdict
+  const V = {
+    blocked: ['bad', 'UDP appears to be blocked',
+      'No STUN reply came back at all, so this device cannot learn its own public address. ' +
+      'Peer-to-peer is impossible from this network. Usually a corporate/school firewall, or a VPN blocking UDP.'],
+    symmetric: ['bad', 'Symmetric NAT — a TURN relay is required',
+      'Your router gave a <b>different public port</b> to each STUN server. That means the address one peer ' +
+      'learns is not the address the other peer must send to, so hole punching cannot work. This is normal on ' +
+      'mobile data and carrier-grade NAT. <b>No amount of application code fixes this</b> — the only solution ' +
+      'is a TURN relay.'],
+    cone: ['ok', 'Cone NAT — peer-to-peer should work',
+      'Your router kept the <b>same public port</b> across both STUN servers, so hole punching should succeed ' +
+      'with any peer that is not itself behind a symmetric NAT. If a connection still fails, run this check on ' +
+      'the other device too — it only takes one bad side.'],
+    multi: ['warn', 'Multiple public addresses seen',
+      'Different public IPs were reported by the two STUN servers, which usually means a VPN, a second network ' +
+      'interface, or a load-balanced carrier NAT. Treat this as likely to need TURN.'],
+    unknown: ['warn', 'Inconclusive',
+      'Only one STUN server replied, so NAT shape could not be compared. Try again; if it repeats, assume TURN is needed.']
+  }[nat];
+
+  w('<span class="' + V[0] + '">' + V[1] + '</span>');
+  verdictBox.style.display = '';
+  verdictBox.innerHTML =
+    '<div class="' + V[0] + '" style="font-size:15px;margin-bottom:8px">' + V[1] + '</div>' +
+    '<div>' + V[2] + '</div>' +
+    (nat === 'symmetric' || nat === 'multi' || nat === 'blocked'
+      ? '<div style="margin-top:10px;opacity:.8">To fix: add a TURN server to <code>TURN_SERVERS</code> in ' +
+        '<code>src/net.js</code>. Everything else about the architecture stays the same — still no game server, ' +
+        'still static hosting.</div>'
+      : '');
+  btn.disabled = false;
+};
+</script>
+</body>
+</html>

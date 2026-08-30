@@ -42,7 +42,8 @@ const RTC_CFG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
     ...TURN_SERVERS
   ]
 };
@@ -189,6 +190,14 @@ function topicMatches(pattern, topic) {
 }
 
 /* ---------------- shared peer plumbing ---------------- */
+
+/** 'host' | 'srflx' | 'relay' | 'prflx' — what kind of path a candidate offers. */
+export function candidateType(cand) {
+  const s = (cand && (cand.candidate || cand)) || '';
+  const m = /\btyp (\w+)/.exec(String(s));
+  return m ? m[1] : 'unknown';
+}
+
 function newPeer(onIce, onOpen, onData, onClose) {
   const pc = new RTCPeerConnection(RTC_CFG);
   pc.onicecandidate = e => { if (e.candidate) onIce(e.candidate.toJSON()); };
@@ -221,6 +230,10 @@ export class HostNet {
     // Keyed by peerId, which is a random secret only that client and we know —
     // so it doubles as the resume credential and never goes on the wire in clear.
     this.vacant = new Map();     // peerId -> {seat, name, ts}
+    // ICE can reach us before the offer that creates the peer entry does.
+    // Dropping those candidates loses exactly the paths a cross-network
+    // connection depends on, so hold them until the entry exists.
+    this.preIce = new Map();     // peerId -> [candidate]
     this.open = false;
     this.started = false;
     this.onJoin = () => {};
@@ -300,6 +313,8 @@ export class HostNet {
       );
       entry.pc = pc;
       pc.ondatachannel = e => wire(e.channel);
+      const early = this.preIce.get(m.from);
+      if (early) { entry.pending.push(...early); this.preIce.delete(m.from); }
       this.peers.set(m.from, entry);
 
       pc.setRemoteDescription({ type: 'offer', sdp: m.sdp })
@@ -314,7 +329,13 @@ export class HostNet {
 
     } else if (m.t === 'ice') {
       const entry = this.peers.get(m.from);
-      if (!entry) return;
+      if (!entry) {
+        // Offer not processed yet — stash rather than discard.
+        const q = this.preIce.get(m.from) || [];
+        if (q.length < 64) q.push(m.candidate);
+        this.preIce.set(m.from, q);
+        return;
+      }
       if (entry.pc && entry.pc.remoteDescription) entry.pc.addIceCandidate(m.candidate).catch(() => {});
       else entry.pending.push(m.candidate);
 
@@ -327,6 +348,7 @@ export class HostNet {
     const e = this.peers.get(peerId);
     if (!e) return;
     this.peers.delete(peerId);
+    this.preIce.delete(peerId);
     try { if (e.ch) e.ch.close(); } catch (x) {}
     try { if (e.pc) e.pc.close(); } catch (x) {}
     this.onLeave(peerId, e.name);
@@ -461,12 +483,18 @@ export class ClientNet {
 
   join(lobby, name, resume) {
     this.lobby = lobby;
+    // Handshake phase, so a failure can name its own cause instead of blaming
+    // the host for everything. 'offering' = the host never replied (signalling);
+    // 'negotiating' = the host replied but no network path could be opened (NAT).
+    this.phase = 'offering';
+    this.candTypes = { host: 0, srflx: 0, relay: 0, prflx: 0, unknown: 0 };
     this._sigTopic = `${BASE}/sig/${lobby.id}/${this.peerId}`;
     const hostTopic = `${BASE}/sig/${lobby.id}/host`;
 
     this.sig.sub(this._sigTopic, m => {
       if (!m) return;
       if (m.t === 'answer') {
+        this.phase = 'negotiating';
         this.pc.setRemoteDescription({ type: 'answer', sdp: m.sdp })
           .then(() => {
             this._pending.forEach(c => this.pc.addIceCandidate(c).catch(() => {}));
@@ -482,12 +510,26 @@ export class ClientNet {
     });
 
     const { pc, wire } = newPeer(
-      cand => this.sig.pub(hostTopic, { t: 'ice', from: this.peerId, candidate: cand }),
-      ch => { this.ch = ch; this.onJoined(); },
+      cand => {
+        this.candTypes[candidateType(cand)] = (this.candTypes[candidateType(cand)] || 0) + 1;
+        this.sig.pub(hostTopic, { t: 'ice', from: this.peerId, candidate: cand });
+      },
+      ch => { this.ch = ch; this.phase = 'connected'; this.onJoined(); },
       data => this.onMessage(data),
       () => { if (this.ch) { this.ch = null; this.onClosed('Connection to host lost'); } }
     );
     this.pc = pc;
+
+    /* An ICE failure before the channel ever opens used to be completely
+       silent — onClose short-circuits on `this.ch` being null — so the only
+       symptom was the 20s timeout claiming the host never responded. That is
+       the wrong diagnosis and it sends you looking at the lobby code. */
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState !== 'failed' || this.ch) return;
+      clearTimeout(this._joinTimer);
+      this.onClosed(this.noRouteMessage());
+      this.leave(false);
+    };
     const ch = pc.createDataChannel('game', { ordered: true });
     wire(ch);
 
@@ -498,10 +540,25 @@ export class ClientNet {
       }))
       .catch(() => this.onClosed('Could not create offer'));
 
-    // if the handshake never completes, surface it rather than hanging
+    // If nothing has completed, say which half of the process stalled.
     this._joinTimer = setTimeout(() => {
-      if (!this.ch) { this.onClosed('Host did not respond — they may have closed the table.'); this.leave(false); }
-    }, 20000);
+      if (this.ch) return;
+      this.onClosed(this.phase === 'offering'
+        ? 'The host never answered. They may have closed the table, or signalling is blocked here.'
+        : this.noRouteMessage());
+      this.leave(false);
+    }, 30000);
+  }
+
+  /** Reached the host over the broker but could not open a media path. */
+  noRouteMessage() {
+    const c = this.candTypes || {};
+    return c.srflx
+      ? 'Reached the host, but no direct network path could be opened between you. ' +
+        'One of your networks blocks peer-to-peer (typically mobile data or a strict firewall) — ' +
+        'this needs a TURN relay.'
+      : 'Could not discover your public address (no STUN reply), so no connection to the host was possible. ' +
+        'A firewall is probably blocking UDP.';
   }
 
   send(obj) {
