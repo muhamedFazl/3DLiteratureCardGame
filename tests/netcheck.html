@@ -33,7 +33,7 @@ Run it on both machines that cannot connect — the answer is usually in the NAT
 <div class="verdict" id="verdict" style="display:none"></div>
 
 <script type="module">
-import { candidateType } from '../src/net.js';
+import { candidateType, turnServers, refreshIceServers } from '../src/net.js';
 
 const out = document.getElementById('out');
 const verdictBox = document.getElementById('verdict');
@@ -100,6 +100,48 @@ function loopback(ms = 8000) {
   });
 }
 
+/* The decisive TURN test: force iceTransportPolicy 'relay' so host and srflx
+   candidates are discarded entirely. If two peers still connect and pass a
+   message, the relay is genuinely working — not merely configured. */
+function relayOnlyTest(ms = 15000) {
+  const turn = turnServers();
+  return new Promise(resolve => {
+    if (!turn.length) return resolve({ configured: false });
+    const cfg = { iceServers: turn, iceTransportPolicy: 'relay' };
+    let a, b;
+    try { a = new RTCPeerConnection(cfg); b = new RTCPeerConnection(cfg); }
+    catch (e) { return resolve({ configured: true, error: e.message }); }
+
+    let relayCands = 0, settled = false;
+    const finish = v => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { a.close(); b.close(); } catch (e) {}
+      resolve(Object.assign({ configured: true, relayCands }, v));
+    };
+    const onCand = (pc, other) => e => {
+      if (!e.candidate) return;
+      if (candidateType(e.candidate.candidate) === 'relay') relayCands++;
+      other.addIceCandidate(e.candidate).catch(() => {});
+    };
+    a.onicecandidate = onCand(a, b);
+    b.onicecandidate = onCand(b, a);
+
+    const ch = a.createDataChannel('relayprobe');
+    ch.onopen = () => ch.send('relay-ok');
+    b.ondatachannel = e => {
+      e.channel.onmessage = m => finish({ connected: m.data === 'relay-ok' });
+    };
+    a.createOffer().then(o => a.setLocalDescription(o))
+      .then(() => b.setRemoteDescription(a.localDescription))
+      .then(() => b.createAnswer()).then(x => b.setLocalDescription(x))
+      .then(() => a.setRemoteDescription(b.localDescription))
+      .catch(e => finish({ connected: false, error: e.message }));
+    const timer = setTimeout(() => finish({ connected: false }), ms);
+  });
+}
+
 async function brokerCheck() {
   try {
     const net = await import('../src/net.js');
@@ -158,7 +200,26 @@ document.getElementById('run').onclick = async () => {
   }
   w();
 
-  // 5. verdict
+  // 5. TURN relay — the fallback that makes symmetric NAT survivable
+  w('4. TURN relay (forced relay-only connection)');
+  await refreshIceServers();
+  const rt = await relayOnlyTest();
+  let turnOk = false;
+  if (!rt.configured) {
+    w('   <span class="warn">none configured</span> — no TURN server set in src/net.js. ' +
+      'Peer-to-peer will work only where NAT permits it.');
+  } else if (rt.connected) {
+    turnOk = true;
+    w('   <span class="ok">PASS</span> — relayed a message with direct paths disabled (' +
+      rt.relayCands + ' relay candidates). Symmetric NAT is survivable.');
+  } else {
+    w('   <span class="bad">FAIL</span> — relay candidates: ' + rt.relayCands +
+      (rt.error ? ', error: ' + rt.error : '') +
+      '. The configured TURN server is not usable from here.');
+  }
+  w();
+
+  // 6. verdict
   const V = {
     blocked: ['bad', 'UDP appears to be blocked',
       'No STUN reply came back at all, so this device cannot learn its own public address. ' +
@@ -179,16 +240,30 @@ document.getElementById('run').onclick = async () => {
       'Only one STUN server replied, so NAT shape could not be compared. Try again; if it repeats, assume TURN is needed.']
   }[nat];
 
-  w('<span class="' + V[0] + '">' + V[1] + '</span>');
+  // A working relay rescues every NAT verdict except an outright UDP block,
+  // and even that often survives because Open Relay listens on TCP 443.
+  let head = V, extra = '';
+  if (turnOk && (nat === 'symmetric' || nat === 'multi' || nat === 'blocked')) {
+    head = ['ok', 'Playable — a TURN relay is covering for your NAT',
+      'Direct peer-to-peer would not work from this network, but the configured relay ' +
+      'connected with direct paths disabled, so games will still work. Expect slightly ' +
+      'higher latency on relayed connections.'];
+    extra = '<div style="margin-top:10px;opacity:.75">Underlying NAT: ' + V[1] + '</div>';
+  } else if (!turnOk && (nat === 'symmetric' || nat === 'multi' || nat === 'blocked')) {
+    extra = '<div style="margin-top:10px;opacity:.8">' +
+      (rt.configured
+        ? 'The configured relay did not work either, so there is no fallback right now. '
+        : 'No relay is configured, so there is no fallback. ') +
+      'See the ICE configuration block at the top of <code>src/net.js</code> — set either ' +
+      '<code>TURN_SERVERS</code> (fixed credentials) or <code>TURN_FETCH_URL</code> ' +
+      '(a provider endpoint issuing short-lived ones), then re-run this check.</div>';
+  }
+
+  w('<span class="' + head[0] + '">' + head[1] + '</span>');
   verdictBox.style.display = '';
   verdictBox.innerHTML =
-    '<div class="' + V[0] + '" style="font-size:15px;margin-bottom:8px">' + V[1] + '</div>' +
-    '<div>' + V[2] + '</div>' +
-    (nat === 'symmetric' || nat === 'multi' || nat === 'blocked'
-      ? '<div style="margin-top:10px;opacity:.8">To fix: add a TURN server to <code>TURN_SERVERS</code> in ' +
-        '<code>src/net.js</code>. Everything else about the architecture stays the same — still no game server, ' +
-        'still static hosting.</div>'
-      : '');
+    '<div class="' + head[0] + '" style="font-size:15px;margin-bottom:8px">' + head[1] + '</div>' +
+    '<div>' + head[2] + '</div>' + extra;
   btn.disabled = false;
 };
 </script>

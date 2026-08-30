@@ -94,10 +94,29 @@ different STUN servers for your public address. If they report the **same IP but
 different ports**, you are behind a symmetric NAT: hole punching cannot work, and
 that is a property of the network rather than of this code.
 
-To close that gap, add a TURN relay to `TURN_SERVERS` in `src/net.js`. A relay
-only forwards bytes; WebRTC data channels are DTLS-encrypted end to end, so a
-TURN operator cannot read anyone's cards. Nothing else about the architecture
-changes: still no game server, still static hosting.
+**Fixing it: TURN.** A relay is the only thing that gets past a symmetric NAT,
+because both peers can always reach it outbound. ICE falls back to it only when
+no direct path exists, so it costs nothing when peer-to-peer already works, and a
+relay never sees the game: data channels are DTLS-encrypted end to end.
+
+There is deliberately **no default relay**. Every free public TURN server either
+no longer exists or now requires an account — the once-standard Open Relay
+credentials were tested here and produce zero relay candidates. Shipping dead
+credentials is worse than shipping none, because the game then fails silently
+instead of explaining itself. Set one of the two options in the ICE configuration
+block at the top of `src/net.js`:
+
+- `TURN_SERVERS` — fixed credentials, for self-hosted coturn or any static account.
+- `TURN_FETCH_URL` — an endpoint returning a JSON array of `RTCIceServer` objects,
+  for providers that issue short-lived credentials. Fetched once at startup.
+
+Then re-run `tests/netcheck.html`. Its relay test forces
+`iceTransportPolicy: 'relay'`, discarding all direct paths, so it only passes if
+the relay genuinely carries traffic. Nothing else about the architecture changes:
+still no game server, still static hosting.
+
+Anything in a static page is public, so prefer a provider issuing short-lived
+credentials, or a relay you can rate-limit.
 
 ---
 

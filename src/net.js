@@ -21,32 +21,84 @@ const MQTT_CDNS = [
   'https://cdn.jsdelivr.net/npm/mqtt@5/dist/mqtt.min.js'
 ];
 
-/* STUN lets two peers discover their public address and punch a hole through
+/* ---------------- ICE configuration ----------------
+
+   STUN lets two peers discover their public address and punch a hole through
    most home routers. It is NOT enough on its own: a symmetric NAT allocates a
    different port per destination, so the address learned from the STUN server
    is not the one the other peer must send to, and the hole punch fails. That
    is common on mobile carriers and CGNAT, and on many corporate networks.
-   The fix is a TURN relay, which both peers can always reach outbound.
 
-   No TURN server is configured by default — running one, or signing up for a
-   hosted one, is a deployment decision. Add credentials here and cross-network
-   play stops depending on NAT luck:
+   A TURN server fixes that by relaying, because both peers can always reach it
+   outbound. ICE only falls back to a relay when no direct path exists, so
+   adding one costs nothing when peer-to-peer already works. A relay forwards
+   bytes and nothing more — data channels are DTLS-encrypted end to end, so a
+   TURN operator cannot read anyone's cards.
 
-     { urls: 'turn:your.host:3478', username: 'user', credential: 'pass' }
+   There is deliberately no default. Every free public TURN relay either no
+   longer exists or now requires an account, and shipping dead credentials is
+   worse than shipping none: the game fails silently instead of telling you
+   why. Set ONE of the two options below, then confirm it with
+   tests/netcheck.html, which forces a relay-only connection and fails loudly
+   if the relay is not genuinely working.
 
-   A relay only forwards bytes: WebRTC data channels are DTLS-encrypted end to
-   end, so a TURN operator cannot read anyone's cards. */
+   Option 1 — static credentials (self-hosted coturn, or any fixed account):
+
+     export const TURN_SERVERS = [
+       { urls: 'turn:your.host:3478', username: 'user', credential: 'pass' },
+       { urls: 'turns:your.host:5349?transport=tcp', username: 'user', credential: 'pass' }
+     ];
+
+   Option 2 — ephemeral credentials from a provider's API (Metered, Cloudflare
+   and friends issue short-lived credentials rather than fixed ones). Point
+   TURN_FETCH_URL at an endpoint returning a JSON array of RTCIceServer objects
+   and it is fetched once at startup:
+
+     export const TURN_FETCH_URL =
+       'https://YOURSUB.metered.live/api/v1/turn/credentials?apiKey=YOURKEY';
+
+   Note that anything you put in a static page is public. Prefer a provider
+   that issues short-lived credentials, or a relay you can rate-limit. */
 export const TURN_SERVERS = [];
+export const TURN_FETCH_URL = '';
 
-const RTC_CFG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
-    ...TURN_SERVERS
-  ]
-};
+const STUN_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' }
+];
+
+/* Mutated in place by refreshIceServers(), and read by newPeer() at call time,
+   so a late-arriving TURN list still reaches every connection made afterwards. */
+const RTC_CFG = { iceServers: [...STUN_SERVERS, ...TURN_SERVERS] };
+
+export function iceServers() { return RTC_CFG.iceServers.slice(); }
+export function turnServers() {
+  return RTC_CFG.iceServers.filter(s => /^turns?:/.test(
+    Array.isArray(s.urls) ? s.urls[0] : s.urls));
+}
+
+let icePulled = false;
+/** Pull ephemeral TURN credentials once, if an endpoint is configured. */
+export async function refreshIceServers() {
+  if (icePulled || !TURN_FETCH_URL) return RTC_CFG.iceServers;
+  icePulled = true;
+  try {
+    const ctl = new AbortController();
+    const to = setTimeout(() => ctl.abort(), 6000);
+    const r = await fetch(TURN_FETCH_URL, { signal: ctl.signal });
+    clearTimeout(to);
+    const list = await r.json();
+    if (Array.isArray(list) && list.length) {
+      RTC_CFG.iceServers = [...STUN_SERVERS, ...TURN_SERVERS, ...list];
+    }
+  } catch (e) {
+    // Non-fatal: play continues on STUN alone, and a failed connection now
+    // explains itself rather than blaming the host.
+  }
+  return RTC_CFG.iceServers;
+}
 
 const BEACON_MS = 2500;
 const LOBBY_TTL = 9000;
@@ -121,6 +173,7 @@ export class Signal {
 
   async connect(onStatus) {
     const mqtt = await ensureMqtt();
+    await refreshIceServers();          // before any peer connection is built
     for (const url of BROKERS) {
       if (onStatus) onStatus('Connecting to ' + new URL(url).hostname + '…');
       try {
