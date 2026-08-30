@@ -66,12 +66,31 @@ the rejoin offer appears without needing a reload. Departures are announced on
 which still works when WebRTC is gone — so the host holds the seat at once
 rather than after an ICE timeout.
 
-### Connectivity limits
+### Playing across different networks
 
-Peer connections use public STUN only, with no TURN relay. Same-Wi-Fi connections
-are essentially always fine. Across the internet, most home networks work, but a
-strict/symmetric NAT or corporate firewall may fail to connect. Adding a TURN
-server would close that gap.
+Two things have to work, and they fail independently.
+
+**Finding the table.** Beacons are published per network bucket, so a friend on
+other Wi-Fi will not see your table in the list. That is what the room code is
+for: entering a code searches *every* bucket, not just your own. The *Show tables
+on other networks* toggle does the same for browsing.
+
+**Connecting.** Signalling goes through the public broker and is unaffected by
+distance. The peer connection is the fragile part: it uses public STUN with no
+TURN relay configured. STUN lets two peers punch a hole through most home
+routers, but a **symmetric NAT** hands out a different port per destination, so
+the address STUN reports is not the one the other peer must send to and the
+punch fails. In practice:
+
+- Same Wi-Fi — essentially always works.
+- Home broadband to home broadband — usually works.
+- **Mobile data on either side — often fails.** Carriers commonly use CGNAT with
+  symmetric NAT.
+- Corporate/university networks — often blocked outright.
+
+To close that gap, add a TURN relay to `TURN_SERVERS` in `src/net.js`. A relay
+only forwards bytes; WebRTC data channels are DTLS-encrypted end to end, so a
+TURN operator cannot read anyone'''s cards.
 
 ---
 

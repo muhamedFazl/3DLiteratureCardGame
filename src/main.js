@@ -729,11 +729,22 @@ UI.on.host = () => startHosting();
 UI.on.bots = () => { UI.overlay('joinOverlay', false); leaveQueue(); startBotsMatch(); };
 
 UI.on.joinLobby = joinLobby;
-UI.on.joinCode = code => {
-  if (!code || !App.clientNet) return;
-  const l = App.clientNet.findByCode(code);
+UI.on.joinCode = async code => {
+  if (!code) return;
+  if (!App.clientNet) {
+    try { await ensureSignal(); } catch (e) {
+      UI.toast('Could not reach the lobby broker.', 'bad'); return;
+    }
+    wireClientNet();
+  }
+  // Beacons a table publishes land in the topic for ITS network, not ours, so
+  // a code has to be searched for everywhere. This is the path people use when
+  // they are not on the same Wi-Fi.
+  UI.toast('Looking for table ' + code + '…');
+  const l = await App.clientNet.probeByCode(code, 7000);
+  UI.toast('');
   if (l) joinLobby(l);
-  else UI.toast('No table with code ' + code + ' on this network. Try “Show all networks”.', 'bad');
+  else UI.toast('No open table with code ' + code + '. Check the code and that the host still has the table open.', 'bad');
 };
 UI.on.leaveQueue = leaveQueue;
 UI.on.toggleShowAll = v => {

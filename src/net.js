@@ -21,11 +21,29 @@ const MQTT_CDNS = [
   'https://cdn.jsdelivr.net/npm/mqtt@5/dist/mqtt.min.js'
 ];
 
+/* STUN lets two peers discover their public address and punch a hole through
+   most home routers. It is NOT enough on its own: a symmetric NAT allocates a
+   different port per destination, so the address learned from the STUN server
+   is not the one the other peer must send to, and the hole punch fails. That
+   is common on mobile carriers and CGNAT, and on many corporate networks.
+   The fix is a TURN relay, which both peers can always reach outbound.
+
+   No TURN server is configured by default — running one, or signing up for a
+   hosted one, is a deployment decision. Add credentials here and cross-network
+   play stops depending on NAT luck:
+
+     { urls: 'turn:your.host:3478', username: 'user', credential: 'pass' }
+
+   A relay only forwards bytes: WebRTC data channels are DTLS-encrypted end to
+   end, so a TURN operator cannot read anyone's cards. */
+export const TURN_SERVERS = [];
+
 const RTC_CFG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' }
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    ...TURN_SERVERS
   ]
 };
 
@@ -410,6 +428,35 @@ export class ClientNet {
   findByCode(code) {
     for (const l of this.lobbies.values()) if (l.code === code.toUpperCase()) return l;
     return null;
+  }
+
+  /** Search EVERY network bucket for a room code. The code is the mechanism for
+      playing with someone on a different network, so it must not be limited to
+      the bucket we happen to be subscribed to. */
+  probeByCode(code, timeoutMs) {
+    const want = String(code || '').toUpperCase();
+    const local = this.findByCode(want);
+    if (local) return Promise.resolve(local);
+
+    return new Promise(resolve => {
+      const topic = `${BASE}/net/+/lobbies`;
+      let settled = false;
+      const finish = v => {
+        if (settled) return;
+        settled = true;
+        this.sig.unsub(topic, cb);
+        clearTimeout(timer);
+        resolve(v);
+      };
+      const cb = m => {
+        if (m && m.t === 'lobby' && m.code === want && m.live !== false && !m.started) {
+          this.lobbies.set(m.id, Object.assign({}, m, { seen: Date.now() }));
+          finish(this.lobbies.get(m.id));
+        }
+      };
+      this.sig.sub(topic, cb);
+      const timer = setTimeout(() => finish(null), timeoutMs || 7000);
+    });
   }
 
   join(lobby, name, resume) {
