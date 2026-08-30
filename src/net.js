@@ -242,6 +242,62 @@ function topicMatches(pattern, topic) {
   return p.length === t.length;
 }
 
+/* ---------------- end-to-end crypto for the relay path ----------------
+
+   When WebRTC cannot punch through, game traffic falls back to the same MQTT
+   broker used for signalling. That broker is public, and this is a hidden-
+   information game — private hands must not be readable by anyone watching a
+   topic. So relayed payloads are sealed with AES-GCM under a key both sides
+   derive by ECDH, with the public halves riding along on the offer/answer we
+   already exchange. The broker only ever sees ciphertext.
+
+   This protects against eavesdropping, not against an active attacker who
+   intercepts the key exchange itself. Room topics are unguessable random ids
+   and this is a card game between friends, so that trade is deliberate. */
+
+const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const unb64 = str => Uint8Array.from(atob(str), c => c.charCodeAt(0));
+
+export async function genKeyPair() {
+  const kp = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']);
+  const raw = await crypto.subtle.exportKey('raw', kp.publicKey);
+  return { priv: kp.privateKey, pub: b64(raw) };
+}
+
+export async function deriveKey(priv, peerPub) {
+  const pub = await crypto.subtle.importKey(
+    'raw', unb64(peerPub), { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  return crypto.subtle.deriveKey(
+    { name: 'ECDH', public: pub }, priv,
+    { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+async function seal(key, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key,
+    new TextEncoder().encode(JSON.stringify(obj)));
+  return { i: b64(iv), d: b64(ct) };
+}
+
+async function unseal(key, p) {
+  const pt = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: unb64(p.i) }, key, unb64(p.d));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+
+/* Encryption is async, and the game depends on message order (deal before
+   state, ask before its result). Chaining every send and every receive onto a
+   per-peer promise keeps them strictly sequential. */
+function chain(holder, prop, fn) {
+  const prev = holder[prop] || Promise.resolve();
+  holder[prop] = prev.then(fn).catch(() => {});
+  return holder[prop];
+}
+
+const relayIn  = (lobbyId, peerId) => `${BASE}/rly/${lobbyId}/${peerId}/h`;
+const relayOut = (lobbyId, peerId) => `${BASE}/rly/${lobbyId}/${peerId}/c`;
+
 /* ---------------- shared peer plumbing ---------------- */
 
 /** 'host' | 'srflx' | 'relay' | 'prflx' — what kind of path a candidate offers. */

@@ -21,6 +21,24 @@
   .verdict { margin-top:18px; padding:16px; border-radius:8px; border:1px solid #24374a;
              background:#101c26; font-size:14px; line-height:1.6; }
   code { background:#182837; padding:1px 5px; border-radius:4px; font-size:12.5px; }
+  .panel { margin-top:28px; padding:18px; border:1px solid #24374a; border-radius:10px;
+           background:#0e1822; }
+  .panel h2 { margin:0 0 6px; font-size:16px; }
+  .panel .hint { font-size:12.5px; opacity:.6; margin-bottom:14px; line-height:1.55; }
+  label { display:block; font-size:11px; text-transform:uppercase; letter-spacing:1.1px;
+          opacity:.6; margin:12px 0 5px; }
+  input, textarea { width:100%; padding:9px 10px; font:13px/1.5 ui-monospace,Consolas,monospace;
+    color:#e8eef5; background:#182837; border:1px solid #35516b; border-radius:6px; outline:none; }
+  input:focus, textarea:focus { border-color:#5b93cc; }
+  textarea { resize:vertical; min-height:62px; }
+  .row { display:flex; gap:10px; }
+  .row > div { flex:1; }
+  .tabs { display:flex; gap:8px; margin-bottom:4px; }
+  .tab { padding:7px 14px; border-radius:7px; border:1px solid #35516b; background:#182837;
+         cursor:pointer; font-size:12.5px; font-weight:600; user-select:none; }
+  .tab.sel { background:#2f6fb5; border-color:#7fb6f0; }
+  .btnrow { display:flex; gap:10px; margin-top:16px; align-items:center; flex-wrap:wrap; }
+  button.ghost { background:transparent; border-color:#33485e; }
 </style>
 </head>
 <body>
@@ -31,6 +49,40 @@ Run it on both machines that cannot connect — the answer is usually in the NAT
 <button id="run">Run check</button>
 <pre id="out">Ready.</pre>
 <div class="verdict" id="verdict" style="display:none"></div>
+
+<div class="panel">
+  <h2>TURN setup</h2>
+  <div class="hint">Test a relay's credentials here <b>before</b> putting them in the code.
+    This forces a relay-only connection, so a PASS means the relay really carries traffic.
+    Nothing is sent anywhere except to the relay you name.</div>
+
+  <div class="tabs">
+    <div class="tab sel" id="tabStatic">Fixed credentials</div>
+    <div class="tab" id="tabFetch">Provider endpoint</div>
+  </div>
+
+  <div id="paneStatic">
+    <label>TURN URLs (one per line)</label>
+    <textarea id="turnUrls" spellcheck="false"
+      placeholder="turn:your.host:3478&#10;turns:your.host:5349?transport=tcp"></textarea>
+    <div class="row">
+      <div><label>Username</label><input id="turnUser" spellcheck="false" autocomplete="off"></div>
+      <div><label>Credential</label><input id="turnPass" spellcheck="false" autocomplete="off"></div>
+    </div>
+  </div>
+
+  <div id="paneFetch" style="display:none">
+    <label>Endpoint returning a JSON array of RTCIceServer objects</label>
+    <input id="turnFetch" spellcheck="false" autocomplete="off"
+      placeholder="https://YOURSUB.metered.live/api/v1/turn/credentials?apiKey=YOURKEY">
+  </div>
+
+  <div class="btnrow">
+    <button id="testTurn">Test this relay</button>
+    <button id="showCfg" class="ghost">Show config to paste</button>
+  </div>
+  <pre id="turnOut" style="display:none"></pre>
+</div>
 
 <script type="module">
 import { candidateType, turnServers, refreshIceServers } from '../src/net.js';
@@ -103,8 +155,8 @@ function loopback(ms = 8000) {
 /* The decisive TURN test: force iceTransportPolicy 'relay' so host and srflx
    candidates are discarded entirely. If two peers still connect and pass a
    message, the relay is genuinely working — not merely configured. */
-function relayOnlyTest(ms = 15000) {
-  const turn = turnServers();
+function relayOnlyTest(ms = 15000, servers) {
+  const turn = servers || turnServers();
   return new Promise(resolve => {
     if (!turn.length) return resolve({ configured: false });
     const cfg = { iceServers: turn, iceTransportPolicy: 'relay' };
@@ -152,6 +204,124 @@ async function brokerCheck() {
     return url;
   } catch (e) { return null; }
 }
+
+/* ---------------- TURN setup panel ---------------- */
+const $ = id => document.getElementById(id);
+const KEY = 'lit.turntest';
+let mode = 'static';
+
+function setMode(m) {
+  mode = m;
+  $('tabStatic').classList.toggle('sel', m === 'static');
+  $('tabFetch').classList.toggle('sel', m === 'fetch');
+  $('paneStatic').style.display = m === 'static' ? '' : 'none';
+  $('paneFetch').style.display = m === 'fetch' ? '' : 'none';
+  save();
+}
+function save() {
+  try {
+    localStorage.setItem(KEY, JSON.stringify({
+      mode, urls: $('turnUrls').value, user: $('turnUser').value,
+      pass: $('turnPass').value, fetch: $('turnFetch').value
+    }));
+  } catch (e) {}
+}
+(function restore() {
+  let v = null;
+  try { v = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) {}
+  if (!v) return;
+  $('turnUrls').value = v.urls || '';
+  $('turnUser').value = v.user || '';
+  $('turnPass').value = v.pass || '';
+  $('turnFetch').value = v.fetch || '';
+  setMode(v.mode || 'static');
+})();
+['turnUrls', 'turnUser', 'turnPass', 'turnFetch'].forEach(id => $(id).addEventListener('input', save));
+$('tabStatic').onclick = () => setMode('static');
+$('tabFetch').onclick = () => setMode('fetch');
+
+function staticServers() {
+  const urls = $('turnUrls').value.split(/[\n,]/).map(t => t.trim()).filter(Boolean);
+  if (!urls.length) return [];
+  const username = $('turnUser').value.trim();
+  const credential = $('turnPass').value.trim();
+  return urls.map(u => ({ urls: u, username, credential }));
+}
+
+async function fetchedServers(url) {
+  const ctl = new AbortController();
+  const to = setTimeout(() => ctl.abort(), 8000);
+  const r = await fetch(url, { signal: ctl.signal });
+  clearTimeout(to);
+  const list = await r.json();
+  if (!Array.isArray(list)) throw new Error('endpoint did not return a JSON array');
+  return list;
+}
+
+$('testTurn').onclick = async () => {
+  const box = $('turnOut');
+  box.style.display = '';
+  box.innerHTML = 'Testing…';
+  $('testTurn').disabled = true;
+  try {
+    let servers;
+    if (mode === 'fetch') {
+      const url = $('turnFetch').value.trim();
+      if (!url) { box.innerHTML = '<span class="warn">Enter an endpoint URL first.</span>'; return; }
+      try { servers = await fetchedServers(url); }
+      catch (e) {
+        box.innerHTML = '<span class="bad">Could not read the endpoint</span> — ' + e.message +
+          '\nCheck the URL, and that the provider allows requests from this origin (CORS).';
+        return;
+      }
+      box.innerHTML = 'Endpoint returned ' + servers.length + ' entries. Testing relay…';
+    } else {
+      servers = staticServers();
+      if (!servers.length) { box.innerHTML = '<span class="warn">Enter at least one TURN URL.</span>'; return; }
+    }
+
+    const turnOnly = servers.filter(x => /^turns?:/.test(Array.isArray(x.urls) ? x.urls[0] : x.urls));
+    if (!turnOnly.length) {
+      box.innerHTML = '<span class="bad">No turn: or turns: URLs in that list</span> — ' +
+        'STUN entries alone cannot relay.';
+      return;
+    }
+
+    const r = await relayOnlyTest(15000, turnOnly);
+    box.innerHTML = r.connected
+      ? '<span class="ok">PASS</span> — relayed a message with all direct paths disabled (' +
+        r.relayCands + ' relay candidates).\nThis relay will carry your games. ' +
+        'Paste the config below into src/net.js.'
+      : '<span class="bad">FAIL</span> — relay candidates: ' + r.relayCands +
+        (r.error ? ', error: ' + r.error : '') +
+        '\n' + (r.relayCands === 0
+          ? 'No allocation was granted. Usually wrong credentials, an expired key, or the ' +
+            'host/port being unreachable from here.'
+          : 'Candidates were granted but the connection did not complete. Try the TCP/443 URL if the ' +
+            'provider offers one — some networks only allow TCP out.');
+  } finally {
+    $('testTurn').disabled = false;
+  }
+};
+
+$('showCfg').onclick = () => {
+  const box = $('turnOut');
+  box.style.display = '';
+  if (mode === 'fetch') {
+    box.textContent =
+      '// in src/net.js\n' +
+      "export const TURN_FETCH_URL =\n  '" + ($('turnFetch').value.trim() || 'https://…') + "';";
+  } else {
+    const servers = staticServers();
+    box.textContent =
+      '// in src/net.js\nexport const TURN_SERVERS = [\n' +
+      (servers.length
+        ? servers.map(x => "  { urls: '" + x.urls + "', username: '" + x.username +
+            "', credential: '" + x.credential + "' }").join(',\n')
+        : "  // fill the fields above first") +
+      '\n];';
+  }
+};
 
 document.getElementById('run').onclick = async () => {
   const btn = document.getElementById('run');
